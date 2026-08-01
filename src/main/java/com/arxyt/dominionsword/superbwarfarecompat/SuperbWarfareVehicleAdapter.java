@@ -123,10 +123,10 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
 
     @Override
     public float portraitPitchDegrees(Entity vehicle) {
-        // Superb Warfare applies its model-space vertical transform in the opposite
-        // direction to the generic/YWZJ renderer. Positive pitch presents the roof
-        // and turret from a stable elevated three-quarter camera.
-        return 16.0F;
+        // Superb Warfare's vehicle model axis is opposite to the portrait-space X
+        // rotation: negative pitch exposes the roof; positive pitch looks upward
+        // through the chassis from below.
+        return -16.0F;
     }
 
     @Override
