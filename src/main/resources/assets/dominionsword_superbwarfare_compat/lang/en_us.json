@@ -1,0 +1,16 @@
+{
+  "menu.dominionsword_superbwarfare_compat.mortar.aim": "Aim Target",
+  "menu.dominionsword_superbwarfare_compat.mortar.fire": "Fire",
+  "menu.dominionsword_superbwarfare_compat.mortar.cancel": "Cancel",
+  "screen.dominionsword_superbwarfare_compat.mortar_ammo": "%s - Select Mortar Shell",
+  "screen.dominionsword_superbwarfare_compat.cancel": "Cancel",
+  "message.dominionsword_superbwarfare_compat.mortar.out_of_range": "The target is outside the mortar command range",
+  "message.dominionsword_superbwarfare_compat.mortar.target_set": "Mortar target marked: %s, %s, %s",
+  "message.dominionsword_superbwarfare_compat.mortar.aim_ordered": "%s is moving to the mortar to complete targeting",
+  "message.dominionsword_superbwarfare_compat.mortar.not_aimed": "The mortar has no marked target",
+  "message.dominionsword_superbwarfare_compat.mortar.no_ammo": "The selected unit has no usable mortar shell",
+  "message.dominionsword_superbwarfare_compat.mortar.fire_ordered": "Ordered loading and firing: %s",
+  "message.dominionsword_superbwarfare_compat.mortar.busy": "The mortar is loading or firing",
+  "message.dominionsword_superbwarfare_compat.mortar.ammo_missing": "The selected mortar shell is no longer in the unit inventory",
+  "message.dominionsword_superbwarfare_compat.mortar.fire_failed": "The mortar rejected the firing command; the shell was returned"
+}

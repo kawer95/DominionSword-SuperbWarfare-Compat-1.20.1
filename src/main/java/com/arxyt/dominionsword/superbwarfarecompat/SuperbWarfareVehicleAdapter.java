@@ -1,6 +1,7 @@
 package com.arxyt.dominionsword.superbwarfarecompat;
 
 import com.arxyt.dominionsword.api.DominionVehicleAdapter;
+import com.atsuishio.superbwarfare.entity.vehicle.MortarEntity;
 import com.mojang.logging.LogUtils;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceKey;
@@ -77,6 +78,9 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
     private static final String ACTION_HELI_HIGH = "superb_helicopter_high_hover";
     private static final String ACTION_HELI_HOLD_ALTITUDE = "superb_helicopter_hold_altitude";
     private static final String ACTION_HELI_SET_ABSOLUTE_ALTITUDE = "superb_helicopter_set_absolute_altitude";
+    private static final String ACTION_MORTAR_AIM = "superb_mortar_aim";
+    private static final String ACTION_MORTAR_FIRE = "superb_mortar_fire_menu";
+    private static final String ACTION_MORTAR_CANCEL = "superb_mortar_cancel";
     private static final String HELI_MODE = "DominionSwordSuperbHeliMode";
     private static final String HELI_HOLD_ALTITUDE = "DominionSwordSuperbHeliHoldAltitude";
     private static final String HELI_LOCKED_ALTITUDE = "DominionSwordSuperbHeliLockedAltitude";
@@ -118,6 +122,14 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
     }
 
     @Override
+    public float portraitPitchDegrees(Entity vehicle) {
+        // Superb Warfare applies its model-space vertical transform in the opposite
+        // direction to the generic/YWZJ renderer. Positive pitch presents the roof
+        // and turret from a stable elevated three-quarter camera.
+        return 16.0F;
+    }
+
+    @Override
     public boolean supports(Entity vehicle) {
         return isSuperbWarfareVehicle(vehicle);
     }
@@ -137,6 +149,13 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
         AABB projected = new AABB(footprint.minX, groundY + 0.02D, footprint.minZ, footprint.maxX, groundY + 0.18D, footprint.maxZ);
         traceHelicopterSelection(vehicle, projected, groundY);
         return projected;
+    }
+
+    @Override
+    public AABB portraitBounds(Entity vehicle) {
+        // Portrait framing needs the complete physical model, but none of the
+        // boarding/selection padding and never the helicopter's ground projection.
+        return wholeVehicleObbBounds(vehicle, vehicle.getBoundingBox());
     }
 
     @Override
@@ -268,6 +287,13 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
 
     @Override
     public List<ActionView> actions(Entity vehicle) {
+        if (vehicle instanceof MortarEntity) {
+            return List.of(
+                    new ActionView(ACTION_MORTAR_AIM, "@menu.dominionsword_superbwarfare_compat.mortar.aim"),
+                    new ActionView(ACTION_MORTAR_FIRE, "@menu.dominionsword_superbwarfare_compat.mortar.fire"),
+                    new ActionView(ACTION_MORTAR_CANCEL, "@menu.dominionsword_superbwarfare_compat.mortar.cancel")
+            );
+        }
         if (!isHelicopter(vehicle) || !(driver(vehicle) instanceof Mob mob)) return List.of();
         String mode = mob.getPersistentData().getString(HELI_MODE);
         if (!isHelicopterFlying(vehicle) || "LANDING".equals(mode) || "LANDED".equals(mode) || mode.isBlank()) {
@@ -285,6 +311,11 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
 
     @Override
     public boolean performAction(ServerPlayer player, Entity vehicle, String actionId) {
+        if (vehicle instanceof MortarEntity mortar) {
+            if (ACTION_MORTAR_AIM.equals(actionId)) { MortarCommands.beginAim(player, mortar); return true; }
+            if (ACTION_MORTAR_FIRE.equals(actionId)) { MortarCommands.requestFire(player, mortar); return true; }
+            return ACTION_MORTAR_CANCEL.equals(actionId);
+        }
         if (!isHelicopter(vehicle) || !(driver(vehicle) instanceof Mob mob)) return false;
         if (ACTION_HELI_TAKEOFF.equals(actionId)) {
             setHelicopterTask(mob, vehicle, "TAKEOFF");

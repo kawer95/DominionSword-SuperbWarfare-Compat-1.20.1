@@ -39,6 +39,12 @@ dependencies {
     if (project.hasProperty('superbwarfare_jar')) {
         compileOnly files(project.property('superbwarfare_jar'))
     }
+    if (project.hasProperty('geckolib_jar')) {
+        compileOnly files(project.property('geckolib_jar'))
+    }
+    if (project.hasProperty('kotlinforforge_jar')) {
+        compileOnly files(project.property('kotlinforforge_jar'))
+    }
 }
 
 tasks.named('processResources', ProcessResources).configure {

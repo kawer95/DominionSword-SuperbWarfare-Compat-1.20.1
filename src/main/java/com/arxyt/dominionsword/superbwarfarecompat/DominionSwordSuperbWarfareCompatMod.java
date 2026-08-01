@@ -1,6 +1,7 @@
 package com.arxyt.dominionsword.superbwarfarecompat;
 
 import com.arxyt.dominionsword.api.DominionAdapters;
+import com.arxyt.dominionsword.api.DominionEntityInteractions;
 import com.arxyt.dominionsword.api.DominionVehicleAdapters;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
@@ -15,8 +16,10 @@ public final class DominionSwordSuperbWarfareCompatMod {
 
     public DominionSwordSuperbWarfareCompatMod() {
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, SuperbWarfareCompatConfig.SPEC);
+        MortarNetwork.register();
         DominionAdapters.register(new SuperbWarfareUnitAdapter());
         DominionVehicleAdapters.register(vehicleAdapter);
+        DominionEntityInteractions.register(new MortarEntityInteractionAdapter());
         MinecraftForge.EVENT_BUS.addListener(this::onServerTick);
     }
 
