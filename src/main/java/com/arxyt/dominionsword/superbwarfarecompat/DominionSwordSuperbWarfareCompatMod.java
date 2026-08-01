@@ -1,0 +1,28 @@
+package com.arxyt.dominionsword.superbwarfarecompat;
+
+import com.arxyt.dominionsword.api.DominionAdapters;
+import com.arxyt.dominionsword.api.DominionVehicleAdapters;
+import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.fml.ModLoadingContext;
+import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.config.ModConfig;
+
+@Mod(DominionSwordSuperbWarfareCompatMod.MODID)
+public final class DominionSwordSuperbWarfareCompatMod {
+    public static final String MODID = "dominionsword_superbwarfare_compat";
+    private final SuperbWarfareVehicleAdapter vehicleAdapter = new SuperbWarfareVehicleAdapter();
+
+    public DominionSwordSuperbWarfareCompatMod() {
+        ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, SuperbWarfareCompatConfig.SPEC);
+        DominionAdapters.register(new SuperbWarfareUnitAdapter());
+        DominionVehicleAdapters.register(vehicleAdapter);
+        MinecraftForge.EVENT_BUS.addListener(this::onServerTick);
+    }
+
+    private void onServerTick(TickEvent.ServerTickEvent event) {
+        if (event.phase != TickEvent.Phase.END) return;
+        SuperbWarfareVehicleAdapter.cleanupExpiredCaches(event.getServer().overworld().getGameTime());
+        vehicleAdapter.tickHelicopterAutopilot(event.getServer());
+    }
+}
