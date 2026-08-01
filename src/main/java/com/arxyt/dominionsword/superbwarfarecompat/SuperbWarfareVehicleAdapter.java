@@ -130,6 +130,13 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
     }
 
     @Override
+    public float portraitYawDegrees(Entity vehicle) {
+        // The renderer's model front is opposite the generic portrait front.
+        // Preserve the three-quarter angle while rotating the view to the front.
+        return 215.0F;
+    }
+
+    @Override
     public boolean supports(Entity vehicle) {
         return isSuperbWarfareVehicle(vehicle);
     }
