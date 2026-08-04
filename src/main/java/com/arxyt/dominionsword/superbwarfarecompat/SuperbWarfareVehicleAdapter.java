@@ -149,7 +149,10 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
 
     @Override
     public boolean selectable(Entity vehicle) {
-        return supports(vehicle) && (isHelicopter(vehicle) || hasAnyPassenger(vehicle));
+        // Empty vehicles remain interaction targets (for boarding) and helicopters
+        // still expose their dashed ground projection, but only an occupied vehicle
+        // may become a directly controlled selection.
+        return supports(vehicle) && hasAnyPassenger(vehicle);
     }
 
     @Override
@@ -158,7 +161,7 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
         AABB footprint = obb == null ? DominionVehicleAdapter.super.selectionBounds(vehicle) : obb.worldAabb().inflate(0.75D, 0.25D, 0.75D);
         if (!isHelicopter(vehicle)) return footprint;
         footprint = wholeVehicleObbBounds(vehicle, footprint).inflate(1.0D, 0.0D, 1.0D);
-        double groundY = groundProjectionY(vehicle, footprint.getCenter().x, footprint.getCenter().z);
+        double groundY = projectedFootprintGroundY(vehicle, footprint);
         AABB projected = new AABB(footprint.minX, groundY + 0.02D, footprint.minZ, footprint.maxX, groundY + 0.18D, footprint.maxZ);
         traceHelicopterSelection(vehicle, projected, groundY);
         return projected;
@@ -1484,6 +1487,30 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
             y--;
         }
         return level.getMinBuildHeight();
+    }
+
+    /**
+     * A large rotor footprint can have its center over a one-block depression even
+     * though most of the projected ring lies on the surrounding floor. Projecting
+     * the entire ring onto that single low sample buries both ring and tether. Use
+     * the highest of a small, fixed set of inset samples so the command marker stays
+     * visible without scanning every block covered by the aircraft.
+     */
+    private static double projectedFootprintGroundY(Entity vehicle, AABB footprint) {
+        double centerX = footprint.getCenter().x;
+        double centerZ = footprint.getCenter().z;
+        double insetX = Math.min(2.0D, footprint.getXsize() * 0.2D);
+        double insetZ = Math.min(2.0D, footprint.getZsize() * 0.2D);
+        double minX = Math.min(centerX, footprint.minX + insetX);
+        double maxX = Math.max(centerX, footprint.maxX - insetX);
+        double minZ = Math.min(centerZ, footprint.minZ + insetZ);
+        double maxZ = Math.max(centerZ, footprint.maxZ - insetZ);
+        double highest = groundProjectionY(vehicle, centerX, centerZ);
+        highest = Math.max(highest, groundProjectionY(vehicle, minX, centerZ));
+        highest = Math.max(highest, groundProjectionY(vehicle, maxX, centerZ));
+        highest = Math.max(highest, groundProjectionY(vehicle, centerX, minZ));
+        highest = Math.max(highest, groundProjectionY(vehicle, centerX, maxZ));
+        return highest;
     }
 
     private static Entity readEntity(Object value) {
