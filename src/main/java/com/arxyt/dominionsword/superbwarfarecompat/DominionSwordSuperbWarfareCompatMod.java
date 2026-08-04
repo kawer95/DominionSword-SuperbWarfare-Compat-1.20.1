@@ -5,6 +5,8 @@ import com.arxyt.dominionsword.api.DominionEntityInteractions;
 import com.arxyt.dominionsword.api.DominionVehicleAdapters;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.entity.EntityJoinLevelEvent;
+import net.minecraftforge.event.entity.EntityLeaveLevelEvent;
 import net.minecraftforge.fml.ModLoadingContext;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.config.ModConfig;
@@ -21,11 +23,21 @@ public final class DominionSwordSuperbWarfareCompatMod {
         DominionVehicleAdapters.register(vehicleAdapter);
         DominionEntityInteractions.register(new MortarEntityInteractionAdapter());
         MinecraftForge.EVENT_BUS.addListener(this::onServerTick);
+        MinecraftForge.EVENT_BUS.addListener(this::onEntityJoin);
+        MinecraftForge.EVENT_BUS.addListener(this::onEntityLeave);
     }
 
     private void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.phase != TickEvent.Phase.END) return;
         SuperbWarfareVehicleAdapter.cleanupExpiredCaches(event.getServer().overworld().getGameTime());
         vehicleAdapter.tickHelicopterAutopilot(event.getServer());
+    }
+
+    private void onEntityJoin(EntityJoinLevelEvent event) {
+        if (!event.getLevel().isClientSide()) vehicleAdapter.onEntityLoaded(event.getEntity());
+    }
+
+    private void onEntityLeave(EntityLeaveLevelEvent event) {
+        if (!event.getLevel().isClientSide()) vehicleAdapter.onEntityUnloaded(event.getEntity());
     }
 }

@@ -4,6 +4,7 @@ import com.arxyt.dominionsword.api.DominionVehicleAdapter;
 import com.atsuishio.superbwarfare.entity.vehicle.MortarEntity;
 import com.mojang.logging.LogUtils;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.SectionPos;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
@@ -13,6 +14,9 @@ import net.minecraft.world.entity.Mob;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.BlockHitResult;
@@ -92,6 +96,8 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
     private final SuperbWarfareUnitAdapter unitAdapter = new SuperbWarfareUnitAdapter();
     private static final Map<UUID, CachedFleetCommand> FLEET_COMMAND_CACHE = new ConcurrentHashMap<>();
     private static final Map<UUID, Long> HELICOPTER_SELECTION_TRACE_TICKS = new ConcurrentHashMap<>();
+    /** Loaded helicopters with persistent autopilot work, indexed without retaining Entity instances. */
+    private static final Map<ResourceKey<Level>, Set<UUID>> ACTIVE_HELICOPTERS = new ConcurrentHashMap<>();
     private static final Map<UUID, Deque<TrackPoint>> LEADER_TRACKS = new ConcurrentHashMap<>();
     private static final Map<TrackRoadKey, TrackRoadSegment> TRACK_ROADS = new ConcurrentHashMap<>();
     private static final Map<TrackSafetyKey, CachedTrackSafety> TRACK_SAFETY_CACHE = new ConcurrentHashMap<>();
@@ -288,7 +294,14 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
     @Override
     public boolean move(ServerPlayer player, Entity vehicle, Vec3 target) {
         Entity driver = driver(vehicle);
-        if (driver instanceof Mob mob) return unitAdapter.move(player, mob, target);
+        if (driver instanceof Mob mob) {
+            boolean moved = unitAdapter.move(player, mob, target);
+            if (isHelicopter(vehicle)) {
+                String mode = mob.getPersistentData().getString(HELI_MODE);
+                if (!mode.isBlank() && !"LANDED".equals(mode)) registerActiveHelicopter(vehicle);
+            }
+            return moved;
+        }
         return false;
     }
 
@@ -423,19 +436,36 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
 
     public void tickHelicopterAutopilot(net.minecraft.server.MinecraftServer server) {
         if (server == null) return;
-        for (net.minecraft.server.level.ServerLevel level : server.getAllLevels()) {
-            for (Entity vehicle : level.getAllEntities()) {
-                if (!isHelicopter(vehicle)) continue;
+        ACTIVE_HELICOPTERS.entrySet().removeIf(entry -> {
+            net.minecraft.server.level.ServerLevel level = server.getLevel(entry.getKey());
+            if (level == null) return true;
+            entry.getValue().removeIf(id -> {
+                Entity vehicle = level.getEntity(id);
+                if (vehicle == null || !vehicle.isAlive() || !isHelicopter(vehicle)) return true;
                 Entity driver = driver(vehicle);
                 if (!(driver instanceof Mob mob)) {
                     if (isHelicopterFlying(vehicle)) stopVehicle(vehicle);
-                    continue;
+                    return true;
                 }
                 String mode = mob.getPersistentData().getString(HELI_MODE);
-                if (mode.isBlank() || "LANDED".equals(mode)) continue;
+                if (mode.isBlank() || "LANDED".equals(mode)) return true;
                 unitAdapter.move(null, mob, helicopterTaskTarget(mob, vehicle));
-            }
-        }
+                return false;
+            });
+            return entry.getValue().isEmpty();
+        });
+    }
+
+    public void onEntityLoaded(Entity entity) {
+        Entity vehicle = isHelicopter(entity) ? entity : entity instanceof Mob mob ? mob.getVehicle() : null;
+        if (vehicle == null || !isHelicopter(vehicle) || !(driver(vehicle) instanceof Mob pilot)) return;
+        String mode = pilot.getPersistentData().getString(HELI_MODE);
+        if (!mode.isBlank() && !"LANDED".equals(mode)) registerActiveHelicopter(vehicle);
+    }
+
+    public void onEntityUnloaded(Entity entity) {
+        Entity vehicle = isHelicopter(entity) ? entity : entity instanceof Mob mob ? mob.getVehicle() : null;
+        if (vehicle != null) unregisterActiveHelicopter(vehicle);
     }
 
     private static void setHelicopterTask(Mob mob, Entity vehicle, String mode) {
@@ -447,6 +477,22 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
         mob.getPersistentData().putDouble(HELI_NAV_X, vehicle.getX());
         mob.getPersistentData().putDouble(HELI_NAV_Y, vehicle.getY());
         mob.getPersistentData().putDouble(HELI_NAV_Z, vehicle.getZ());
+        if (mode.isBlank() || "LANDED".equals(mode)) unregisterActiveHelicopter(vehicle);
+        else registerActiveHelicopter(vehicle);
+    }
+
+    private static void registerActiveHelicopter(Entity vehicle) {
+        if (vehicle == null || vehicle.level().isClientSide()) return;
+        ACTIVE_HELICOPTERS.computeIfAbsent(vehicle.level().dimension(), ignored -> ConcurrentHashMap.newKeySet()).add(vehicle.getUUID());
+    }
+
+    private static void unregisterActiveHelicopter(Entity vehicle) {
+        if (vehicle == null) return;
+        Set<UUID> entries = ACTIVE_HELICOPTERS.get(vehicle.level().dimension());
+        if (entries != null) {
+            entries.remove(vehicle.getUUID());
+            if (entries.isEmpty()) ACTIVE_HELICOPTERS.remove(vehicle.level().dimension(), entries);
+        }
     }
 
     private static Vec3 helicopterTaskTarget(Mob mob, Entity vehicle) {
@@ -1414,12 +1460,28 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
     private static double groundProjectionY(Entity vehicle, double x, double z) {
         if (vehicle == null || vehicle.level() == null) return 0.0D;
         Level level = vehicle.level();
+        int blockX = Mth.floor(x), blockZ = Mth.floor(z);
+        // Selection projection must be relative to the aircraft, not the world's
+        // surface heightmap. Client heightmaps may still be empty while a chunk is
+        // being received (reporting min build height), and roofs/sky islands can
+        // be above the aircraft. Both cases used to hide the ring at Y=-64.
+        // Scan downward from the aircraft while skipping complete empty sections;
+        // this preserves cave/sky-island semantics without a per-block air scan.
         BlockPos.MutableBlockPos cursor = BlockPos.containing(x, vehicle.getY(), z).mutable();
-        for (int y = cursor.getY(); y >= level.getMinBuildHeight(); y--) {
+        LevelChunk chunk = level.getChunk(blockX >> 4, blockZ >> 4);
+        LevelChunkSection[] sections = chunk.getSections();
+        int y = Math.min(cursor.getY(), level.getMaxBuildHeight() - 1);
+        while (y >= level.getMinBuildHeight()) {
+            int sectionIndex = chunk.getSectionIndex(y);
+            if (sectionIndex >= 0 && sectionIndex < sections.length && sections[sectionIndex].hasOnlyAir()) {
+                y = SectionPos.sectionToBlockCoord(SectionPos.blockToSectionCoord(y)) - 1;
+                continue;
+            }
             cursor.setY(y);
             BlockState state = level.getBlockState(cursor);
             VoxelShape shape = state.getCollisionShape(level, cursor);
             if (!state.is(Blocks.BARRIER) && !shape.isEmpty()) return y + shape.max(net.minecraft.core.Direction.Axis.Y);
+            y--;
         }
         return level.getMinBuildHeight();
     }
