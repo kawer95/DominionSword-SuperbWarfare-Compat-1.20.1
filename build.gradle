@@ -48,6 +48,7 @@ dependencies {
 }
 
 tasks.named('processResources', ProcessResources).configure {
+    filteringCharset = 'UTF-8'
     def props = [minecraft_version: minecraft_version, minecraft_version_range: minecraft_version_range,
                  forge_version: forge_version, forge_version_range: forge_version_range,
                  loader_version_range: loader_version_range, mod_id: mod_id, mod_name: mod_name,
