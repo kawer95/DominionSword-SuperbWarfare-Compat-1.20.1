@@ -66,6 +66,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     private static final float FORWARD_ARC = 42.0F;
     private static final float TURN_ONLY_ARC = 105.0F;
     private static final float REVERSE_NAV_ENTER_ARC = 150.0F;
+    private static final float SIDE_REVERSE_ANGLE = 100.0F;
     private static final float REVERSE_NAV_EXIT_ARC = 70.0F;
     private static final int REVERSE_NAV_HOLD_TICKS = 50;
     private static final int[] THREE_POINT_DURATIONS = {34, 28, 30, 24, 24};
@@ -124,10 +125,13 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     private static final String PILOT_THREE_POINT_LAST_Z = "DominionSwordSuperbPilotThreePointLastZ";
     private static final String PILOT_THREE_POINT_LAST_ABS_YAW = "DominionSwordSuperbPilotThreePointLastAbsYaw";
     private static final String PILOT_THREE_POINT_STUCK_TICKS = "DominionSwordSuperbPilotThreePointStuckTicks";
+    private static final String PILOT_THREE_POINT_GIVE_UP_UNTIL = "DominionSwordSuperbPilotThreePointGiveUpUntil";
     private static final int THREE_POINT_REVERSE_PHASE = 0;
     private static final int THREE_POINT_FORWARD_PHASE = 1;
     private static final int THREE_POINT_PHASE_STUCK_TICKS = 10;
     private static final int THREE_POINT_FORWARD_PHASE_TICKS = 18;
+    private static final int THREE_POINT_GIVE_UP_STUCK_TICKS = 20;
+    private static final long THREE_POINT_GIVE_UP_COOLDOWN_TICKS = 40L;
     private static final String PILOT_TARGET_X = "DominionSwordSuperbPilotTargetX";
     private static final String PILOT_TARGET_Z = "DominionSwordSuperbPilotTargetZ";
     private static final String PILOT_CAPTURED_TARGET_X = "DominionSwordSuperbPilotCapturedTargetX";
@@ -757,6 +761,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         boolean tracked = isTrackedVehicle(vehicle);
         boolean wheeled = !tracked && turnRadius > 3.0D;
         boolean rearTarget = absYawDelta >= REVERSE_NAV_ENTER_ARC;
+        boolean threePointCooldown = vehicle.level().getGameTime() < vehicle.getPersistentData().getLong(PILOT_THREE_POINT_GIVE_UP_UNTIL);
         double shortReverseDistance = Math.max(25.0D, profile.length * 2.0D);
         double turnPenalty = absYawDelta / Math.max(8.0D, profile.yawStep);
         double stopPenalty = Math.max(0.0D, speed) * 18.0D;
@@ -783,9 +788,9 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         boolean canThreePoint = canThreePointTurn(vehicle, yawDelta, profile);
         if (!canThreePoint) turnAroundEta += 80.0D;
 
-        boolean shortReverseTarget = rearTarget && horizontalDistance <= shortReverseDistance;
+        boolean shortReverseTarget = absYawDelta >= SIDE_REVERSE_ANGLE && horizontalDistance <= shortReverseDistance;
         boolean cannotArcToTarget = wheeled && absYawDelta >= 45.0F && horizontalDistance <= Math.max(turnRadius * 2.0D, profile.length * 2.5D);
-        boolean shouldThreePoint = !shortReverseTarget && cannotArcToTarget;
+        boolean shouldThreePoint = !shortReverseTarget && cannotArcToTarget && !threePointCooldown;
         DriveMode mode;
         if (shortReverseTarget) {
             mode = DriveMode.REVERSE_SHORT;
@@ -806,7 +811,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     }
 
     private static boolean isShortReverseTarget(float absYawDelta, double horizontalDistance, VehicleProfile profile) {
-        return absYawDelta >= REVERSE_NAV_ENTER_ARC && horizontalDistance <= Math.max(25.0D, profile.length * 2.0D);
+        return absYawDelta >= SIDE_REVERSE_ANGLE && horizontalDistance <= Math.max(25.0D, profile.length * 2.0D);
     }
 
     private static boolean cannotArcToTarget(float absYawDelta, double horizontalDistance, VehicleProfile profile) {
@@ -816,18 +821,16 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
     private static short cruiseKeys(Entity vehicle, float yawDelta, float absYawDelta, double horizontalDistance, boolean wideTurnAvailable, double stopDistance, double routeSpeedLimit, boolean intermediateWaypoint) {
         short keys = 0;
+        boolean reverse = absYawDelta >= TURN_ONLY_ARC && !wideTurnAvailable;
         if (absYawDelta > STEER_DEAD_ZONE) {
-            keys |= yawDelta > 0 ? KEY_RIGHT : KEY_LEFT;
+            if (reverse) keys |= yawDelta > 0 ? KEY_LEFT : KEY_RIGHT;
+            else keys |= yawDelta > 0 ? KEY_RIGHT : KEY_LEFT;
         }
 
         Vec3 velocity = vehicle.getDeltaMovement().multiply(1.0D, 0.0D, 1.0D);
         double speed = Math.sqrt(velocity.lengthSqr());
         double brakeStart = Math.max(stopDistance + 0.35D, sourceBasedBrakeDistance(speed, stopDistance));
-        if (absYawDelta < TURN_ONLY_ARC || wideTurnAvailable) {
-            keys |= KEY_FORWARD;
-        } else if (absYawDelta >= TURN_ONLY_ARC) {
-            keys |= KEY_BRAKE_OR_UP;
-        }
+        keys |= reverse ? KEY_BACK : KEY_FORWARD;
 
         boolean braking = false;
         if (!intermediateWaypoint && horizontalDistance < brakeStart) {
@@ -844,23 +847,19 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
     private static short finalApproachKeys(float yawDelta, float absYawDelta, double horizontalDistance, double stopDistance, double speed, VehicleProfile profile) {
         short keys = 0;
+        boolean reverse = absYawDelta > 55.0F;
         if (absYawDelta > STEER_DEAD_ZONE) {
-            keys |= yawDelta > 0 ? KEY_RIGHT : KEY_LEFT;
+            if (reverse) keys |= yawDelta > 0 ? KEY_LEFT : KEY_RIGHT;
+            else keys |= yawDelta > 0 ? KEY_RIGHT : KEY_LEFT;
         }
 
         double brakeStart = sourceBasedBrakeDistance(speed, stopDistance);
         double hardAlignDistance = Math.max(6.0D, profile.length + 2.0D);
-        boolean badlyMisaligned = absYawDelta > 55.0F;
         boolean moderatelyMisaligned = absYawDelta > 32.0F;
 
         boolean braking = false;
-        if (badlyMisaligned) {
-            if (speed < 0.06D && horizontalDistance > hardAlignDistance) {
-                keys |= KEY_FORWARD;
-            } else {
-                keys |= KEY_BRAKE_OR_UP;
-                braking = true;
-            }
+        if (reverse) {
+            keys |= KEY_BACK;
         } else if (moderatelyMisaligned) {
             if (speed > 0.18D || horizontalDistance <= hardAlignDistance) {
                 keys |= KEY_BRAKE_OR_UP;
@@ -2953,6 +2952,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         data.putInt(PILOT_THREE_POINT_STEP_TICKS, THREE_POINT_DURATIONS[0]);
         data.putInt(PILOT_THREE_POINT_TOTAL_TICKS, 0);
         data.putInt(PILOT_THREE_POINT_STEER, yawDelta > 0.0F ? 1 : -1);
+        data.putInt(PILOT_THREE_POINT_STUCK_TICKS, 0);
         data.remove(PILOT_REVERSE_NAV_TICKS);
     }
 
@@ -2965,6 +2965,11 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             return KEY_BRAKE_OR_UP;
         }
         updateThreePointProgress(vehicle, data, absYaw);
+        if (data.getInt(PILOT_THREE_POINT_STUCK_TICKS) >= THREE_POINT_GIVE_UP_STUCK_TICKS) {
+            data.putLong(PILOT_THREE_POINT_GIVE_UP_UNTIL, vehicle.level().getGameTime() + THREE_POINT_GIVE_UP_COOLDOWN_TICKS);
+            clearThreePointState(data);
+            return KEY_BRAKE_OR_UP;
+        }
         phase = data.getInt(PILOT_THREE_POINT_STEP);
         ticks = data.getInt(PILOT_THREE_POINT_STEP_TICKS);
         if (SuperbWarfareCompatConfig.multiStageKTurnEnabled() && phase == THREE_POINT_FORWARD_PHASE && ticks >= THREE_POINT_FORWARD_PHASE_TICKS) {
