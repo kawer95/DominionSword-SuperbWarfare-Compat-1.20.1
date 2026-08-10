@@ -52,6 +52,7 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
     private static final Map<MethodKey, Optional<Method>> METHOD_CACHE = new ConcurrentHashMap<>();
     private static final Set<MethodKey> BROKEN_METHODS = ConcurrentHashMap.newKeySet();
     private static final Map<Entity, CachedObb> OBB_CACHE = Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<Entity, CachedObb> SELECTION_OBB_CACHE = Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<FleetRouteKey, CachedFleetRoute> FLEET_ROUTE_CACHE = new ConcurrentHashMap<>();
     private static final long FLEET_ROUTE_CACHE_TICKS = 8L;
     private static final double FLEET_ROUTE_NODE_SPACING = 3.0D;
@@ -120,6 +121,9 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
         synchronized (OBB_CACHE) {
             OBB_CACHE.entrySet().removeIf(entry -> entry.getKey() == null || entry.getValue().tick() + 40L < now);
         }
+        synchronized (SELECTION_OBB_CACHE) {
+            SELECTION_OBB_CACHE.entrySet().removeIf(entry -> entry.getKey() == null || entry.getValue().tick() + 40L < now);
+        }
     }
 
     @Override
@@ -157,7 +161,7 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
 
     @Override
     public AABB selectionBounds(Entity vehicle) {
-        OrientedBox obb = boardingObb(vehicle);
+        OrientedBox obb = isHelicopter(vehicle) ? boardingObb(vehicle) : selectionObb(vehicle);
         AABB footprint = obb == null ? DominionVehicleAdapter.super.selectionBounds(vehicle) : obb.worldAabb().inflate(0.75D, 0.25D, 0.75D);
         if (!isHelicopter(vehicle)) return footprint;
         footprint = wholeVehicleObbBounds(vehicle, footprint).inflate(1.0D, 0.0D, 1.0D);
@@ -182,7 +186,7 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
             return List.of(new Vec3(footprint.minX, y, footprint.minZ), new Vec3(footprint.maxX, y, footprint.minZ),
                     new Vec3(footprint.maxX, y, footprint.maxZ), new Vec3(footprint.minX, y, footprint.maxZ));
         }
-        OrientedBox obb = boardingObb(vehicle);
+        OrientedBox obb = selectionObb(vehicle);
         return obb == null ? DominionVehicleAdapter.super.selectionCorners(vehicle) : obb.inflate(0.75D, 0.25D, 0.75D).topCorners();
     }
 
@@ -1624,6 +1628,67 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
         return first;
     }
 
+    /**
+     * Selection uses the complete visual/physical OBB set, while boarding and pathing deliberately
+     * keep using the dedicated collision OBB.  Multipart vehicles such as pickup trucks otherwise
+     * expose a tiny marker around only one chassis component.
+     */
+    private static OrientedBox selectionObb(Entity vehicle) {
+        if (vehicle == null) return null;
+        long tick = vehicle.level().getGameTime();
+        CachedObb cached = SELECTION_OBB_CACHE.get(vehicle);
+        if (cached != null && cached.tick() == tick) return cached.box().orElse(null);
+        OrientedBox box = selectionObbUncached(vehicle);
+        SELECTION_OBB_CACHE.put(vehicle, new CachedObb(tick, Optional.ofNullable(box)));
+        return box;
+    }
+
+    private static OrientedBox selectionObbUncached(Entity vehicle) {
+        List<OrientedBox> boxes = new ArrayList<>();
+        OrientedBox basis = boardingObb(vehicle);
+        if (basis != null) boxes.add(basis);
+        List<?> rawObbs = asList(invokeNoArg(vehicle, "getOBBs"));
+        if (rawObbs != null) {
+            for (Object raw : rawObbs) {
+                OrientedBox box = liveObbToBox(raw);
+                if (box != null) {
+                    boxes.add(box);
+                    if (basis == null) basis = box;
+                }
+            }
+        }
+        if (basis == null) return null;
+        return enclosingOrientedBox(basis, boxes, vehicle.getBoundingBox());
+    }
+
+    private static OrientedBox enclosingOrientedBox(OrientedBox basis, List<OrientedBox> boxes, AABB fallback) {
+        double minX = Double.POSITIVE_INFINITY, minY = Double.POSITIVE_INFINITY, minZ = Double.POSITIVE_INFINITY;
+        double maxX = Double.NEGATIVE_INFINITY, maxY = Double.NEGATIVE_INFINITY, maxZ = Double.NEGATIVE_INFINITY;
+        List<Vec3> points = new ArrayList<>((boxes.size() + 1) * 8);
+        for (OrientedBox box : boxes) points.addAll(box.corners());
+        if (fallback != null) points.addAll(aabbCorners(fallback));
+        for (Vec3 point : points) {
+            double x = point.dot(basis.axisX), y = point.dot(basis.axisY), z = point.dot(basis.axisZ);
+            minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+            minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+            minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+        }
+        if (!Double.isFinite(minX) || !Double.isFinite(maxX)) return basis;
+        Vec3 center = basis.axisX.scale((minX + maxX) * 0.5D)
+                .add(basis.axisY.scale((minY + maxY) * 0.5D))
+                .add(basis.axisZ.scale((minZ + maxZ) * 0.5D));
+        Vec3 extents = new Vec3((maxX - minX) * 0.5D, (maxY - minY) * 0.5D, (maxZ - minZ) * 0.5D);
+        return new OrientedBox(center, basis.axisX, basis.axisY, basis.axisZ, extents);
+    }
+
+    private static List<Vec3> aabbCorners(AABB box) {
+        return List.of(
+                new Vec3(box.minX, box.minY, box.minZ), new Vec3(box.maxX, box.minY, box.minZ),
+                new Vec3(box.maxX, box.minY, box.maxZ), new Vec3(box.minX, box.minY, box.maxZ),
+                new Vec3(box.minX, box.maxY, box.minZ), new Vec3(box.maxX, box.maxY, box.minZ),
+                new Vec3(box.maxX, box.maxY, box.maxZ), new Vec3(box.minX, box.maxY, box.maxZ));
+    }
+
     private static AABB wholeVehicleObbBounds(Entity vehicle, AABB fallback) {
         AABB result = fallback == null ? vehicle.getBoundingBox() : fallback;
         List<?> obbs = asList(invokeNoArg(vehicle, "getOBBs"));
@@ -1738,6 +1803,14 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
                     center.add(axisX.scale(extents.x)).add(axisZ.scale(extents.z)).add(top),
                     center.subtract(axisX.scale(extents.x)).add(axisZ.scale(extents.z)).add(top)
             );
+        }
+
+        List<Vec3> corners() {
+            List<Vec3> result = new ArrayList<>(8);
+            for (int x = -1; x <= 1; x += 2) for (int y = -1; y <= 1; y += 2) for (int z = -1; z <= 1; z += 2) {
+                result.add(center.add(axisX.scale(extents.x * x)).add(axisY.scale(extents.y * y)).add(axisZ.scale(extents.z * z)));
+            }
+            return result;
         }
 
         boolean intersects(OrientedBox other) {
