@@ -28,6 +28,9 @@ repositories { mavenCentral() }
 
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 
     // Compile-only boundaries: this addon must not bundle Dominion Sword or Superb Warfare.
     // Example:
@@ -35,15 +38,19 @@ dependencies {
     //   -Psuperbwarfare_jar=../SuperbWarfare-superbwarfare/build/libs/superbwarfare.jar
     if (project.hasProperty('dominionsword_jar')) {
         compileOnly files(project.property('dominionsword_jar'))
+        testImplementation files(project.property('dominionsword_jar'))
     }
     if (project.hasProperty('superbwarfare_jar')) {
         compileOnly files(project.property('superbwarfare_jar'))
+        testImplementation files(project.property('superbwarfare_jar'))
     }
     if (project.hasProperty('geckolib_jar')) {
         compileOnly files(project.property('geckolib_jar'))
+        testImplementation files(project.property('geckolib_jar'))
     }
     if (project.hasProperty('kotlinforforge_jar')) {
         compileOnly files(project.property('kotlinforforge_jar'))
+        testImplementation files(project.property('kotlinforforge_jar'))
     }
 }
 
@@ -60,3 +67,30 @@ tasks.named('processResources', ProcessResources).configure {
 
 tasks.named('jar', Jar).configure { finalizedBy 'reobfJar' }
 tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+tasks.withType(Test).configureEach { useJUnitPlatform() }
+
+// Java 17 on Windows reads Gradle worker argument files with the active ANSI
+// code page.  This checkout path is non-ASCII, so keep the worker classpath
+// ASCII and carry the real paths through a URI-encoded manifest instead.
+def testClasspathJar = tasks.register('testClasspathJar', Jar) {
+    archiveFileName = 'dominionsword-superbwarfare-compat-test-classpath.jar'
+    def checkoutKey = Integer.toHexString(project.projectDir.absolutePath.hashCode())
+    destinationDirectory = file("${gradle.gradleUserHomeDir}/caches/dominionsword/test-classpath/${checkoutKey}")
+    def encodedTestClasspath = providers.provider {
+        sourceSets.test.runtimeClasspath.files.collect { entry ->
+            String uri = entry.toURI().toASCIIString()
+            String name = entry.name.toLowerCase(java.util.Locale.ROOT)
+            return name.endsWith('.jar') || name.endsWith('.zip') || uri.endsWith('/') ? uri : "${uri}/"
+        }.join(' ')
+    }
+    inputs.property('encodedTestClasspath', encodedTestClasspath)
+    doFirst { manifest.attributes('Class-Path': encodedTestClasspath.get()) }
+}
+
+tasks.withType(Test).configureEach {
+    if (System.getProperty('os.name', '').toLowerCase(java.util.Locale.ROOT).contains('windows')
+            && project.projectDir.absolutePath.codePoints().anyMatch { it > 127 }) {
+        dependsOn testClasspathJar
+        classpath = files(testClasspathJar.flatMap { it.archiveFile })
+    }
+}

@@ -73,6 +73,8 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     private static final int MAX_THREE_POINT_TICKS = 170;
     private static final double SUPPORT_PROBE_DEPTH = 0.18D;
     private static final double AVOIDANCE_STEP = 3.0D;
+    /** Largest ground-height change accepted for each one-block collision sample. */
+    private static final double TERRAIN_FOLLOW_MAX_STEP = 1.05D;
     private static final double AVOIDANCE_LOOKAHEAD = 18.0D;
     private static final double AVOIDANCE_SEARCH_RADIUS = 24.0D;
     private static final int AVOIDANCE_MAX_ITERATIONS = 64;
@@ -1297,7 +1299,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
                 if (occupy != null) build.cells.put(point.key(), new DominionAsyncGridPlanner.Cell(occupy.y, terrainCost(vehicle, occupy)));
             }
             if (build.cursor < build.points.size()) return;
-            build.future = DominionAsyncGridPlanner.submit(new DominionAsyncGridPlanner.Snapshot(new DominionAsyncGridPlanner.Point(0, 0), new DominionAsyncGridPlanner.Point(build.goalX, build.goalZ), Map.copyOf(build.cells), AVOIDANCE_MAX_ITERATIONS, build.profile.maxStepUp, 2.0D));
+            build.future = DominionAsyncGridPlanner.submit(new DominionAsyncGridPlanner.Snapshot(new DominionAsyncGridPlanner.Point(0, 0), new DominionAsyncGridPlanner.Point(build.goalX, build.goalZ), Map.copyOf(build.cells), AVOIDANCE_MAX_ITERATIONS, terrainGridStepHeight(build.profile.maxStepUp), 2.0D));
             return;
         }
         if (!build.future.isDone()) return;
@@ -1646,9 +1648,12 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         Vec3 previous = findSimpleOccupiablePosition(vehicle, from, profile);
         if (previous == null) previous = from;
         for (double d = step; d <= checked + 0.01D; d += step) {
-            Vec3 sample = from.add(dir.scale(Math.min(d, checked)));
+            // Rebase every probe on the previous ground contact.  Keeping from.y here
+            // made a long, continuous descent fall outside simpleStepCandidates after
+            // only one block, even though every individual segment was driveable.
+            Vec3 sample = terrainProbe(from.add(dir.scale(Math.min(d, checked))), previous.y);
             Vec3 occupy = findSimpleOccupiablePosition(vehicle, sample, profile);
-            if (occupy == null) return false;
+            if (occupy == null || !terrainStepAllowed(previous.y, occupy.y, profile.maxStepUp)) return false;
             if (!canSweepSimplePose(vehicle, previous, occupy, profile)) return false;
             previous = occupy;
         }
@@ -1989,12 +1994,46 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     }
 
     private static Vec3 findSimpleOccupiablePosition(Entity vehicle, Vec3 around, VehicleProfile profile) {
-        double baseY = around.y;
+        Vec3 local = findSimpleOccupiableAtHeight(vehicle, around, profile, around.y);
+        if (local != null || !(vehicle.level() instanceof ServerLevel level)) return local;
+
+        // Grid nodes retain only X/Z.  When they are rebuilt from the route origin,
+        // a hillside may be many blocks below that origin.  Fall back to the local
+        // terrain surface so the node remains usable; sweep validation still rejects
+        // walls, ceilings, and abrupt ledges on the way to it.
+        double terrainY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                Mth.floor(around.x), Mth.floor(around.z));
+        return Math.abs(terrainY - around.y) < 1.0E-6D
+                ? null
+                : findSimpleOccupiableAtHeight(vehicle, around, profile, terrainY);
+    }
+
+    private static Vec3 findSimpleOccupiableAtHeight(Entity vehicle, Vec3 around, VehicleProfile profile, double baseY) {
         for (double dy : profile.simpleStepCandidates) {
             Vec3 candidate = new Vec3(around.x, baseY + dy, around.z);
             if (canOccupySimpleVehicleSpace(vehicle, candidate, profile)) return candidate;
         }
         return null;
+    }
+
+    /** Uses the last accepted floor height so a route follows terrain instead of its starting plane. */
+    static Vec3 terrainProbe(Vec3 horizontalSample, double referenceY) {
+        return new Vec3(horizontalSample.x, referenceY, horizontalSample.z);
+    }
+
+    /** A continuous natural slope is valid; a wall-sized vertical jump is not. */
+    static boolean terrainStepAllowed(double previousY, double nextY) {
+        return terrainStepAllowed(previousY, nextY, 0.0D);
+    }
+
+    private static boolean terrainStepAllowed(double previousY, double nextY, double nativeStepUp) {
+        return Double.isFinite(previousY) && Double.isFinite(nextY)
+                && Math.abs(nextY - previousY) <= Math.max(TERRAIN_FOLLOW_MAX_STEP, Math.max(0.0D, nativeStepUp));
+    }
+
+    /** The asynchronous grid samples three horizontal blocks at a time. */
+    static double terrainGridStepHeight(double nativeStepUp) {
+        return Math.max(Math.max(0.0D, nativeStepUp), AVOIDANCE_STEP * TERRAIN_FOLLOW_MAX_STEP);
     }
 
     private static Vec3 safeTargetNear(Entity vehicle, Vec3 finalTarget, VehicleProfile profile) {
