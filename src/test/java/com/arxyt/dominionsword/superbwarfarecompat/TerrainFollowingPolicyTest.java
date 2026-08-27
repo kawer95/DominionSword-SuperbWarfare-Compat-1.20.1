@@ -26,8 +26,8 @@ class TerrainFollowingPolicyTest {
     }
 
     @Test
-    void doesNotThreePointTurnForAnAngledRouteWaypoint() {
+    void leavesTurningToForwardSteeringInsteadOfAngleBasedReverse() {
         assertFalse(SuperbWarfareUnitAdapter.shouldUseThreePointTurn(true, false, true, false, true));
-        assertTrue(SuperbWarfareUnitAdapter.shouldUseThreePointTurn(true, false, true, false, false));
+        assertFalse(SuperbWarfareUnitAdapter.shouldUseThreePointTurn(true, false, true, false, false));
     }
 }

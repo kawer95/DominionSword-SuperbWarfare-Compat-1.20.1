@@ -798,24 +798,15 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         // made wheeled vehicles alternate between forward and reverse on ordinary roads.
         boolean shouldThreePoint = shouldUseThreePointTurn(wheeled, shortReverseTarget, cannotArcToTarget,
                 threePointCooldown, intermediateWaypoint);
-        DriveMode mode;
-        if (shortReverseTarget) {
-            mode = DriveMode.REVERSE_SHORT;
-        } else if (tracked) {
-            mode = DriveMode.FORWARD;
-        } else if (shouldThreePoint) {
-            mode = DriveMode.THREE_POINT;
-        } else if (rearTarget && horizontalDistance > shortReverseDistance) {
-            mode = DriveMode.TURN_AROUND;
-        } else {
-            mode = DriveMode.FORWARD;
-        }
-        return new DriveDecision(mode, forwardEta, reverseEta, turnAroundEta);
+        // Relative target angle is not evidence of a blocked vehicle. On a road, the next
+        // route point is often off the nose while the correct action is simply forward power
+        // plus steering. Reverse is reserved for the native collision/stuck recovery below.
+        return new DriveDecision(DriveMode.FORWARD, forwardEta, reverseEta, turnAroundEta);
     }
 
     static boolean shouldUseThreePointTurn(boolean wheeled, boolean shortReverseTarget, boolean cannotArcToTarget,
                                            boolean threePointCooldown, boolean intermediateWaypoint) {
-        return wheeled && !shortReverseTarget && cannotArcToTarget && !threePointCooldown && !intermediateWaypoint;
+        return false;
     }
 
     private static double estimatedTurnRadius(VehicleProfile profile) {
@@ -833,16 +824,14 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
     private static short cruiseKeys(Entity vehicle, float yawDelta, float absYawDelta, double horizontalDistance, boolean wideTurnAvailable, double stopDistance, double routeSpeedLimit, boolean intermediateWaypoint) {
         short keys = 0;
-        boolean reverse = absYawDelta >= TURN_ONLY_ARC && !wideTurnAvailable;
         if (absYawDelta > STEER_DEAD_ZONE) {
-            if (reverse) keys |= yawDelta > 0 ? KEY_LEFT : KEY_RIGHT;
-            else keys |= yawDelta > 0 ? KEY_RIGHT : KEY_LEFT;
+            keys |= yawDelta > 0 ? KEY_RIGHT : KEY_LEFT;
         }
 
         Vec3 velocity = vehicle.getDeltaMovement().multiply(1.0D, 0.0D, 1.0D);
         double speed = Math.sqrt(velocity.lengthSqr());
         double brakeStart = Math.max(stopDistance + 0.35D, sourceBasedBrakeDistance(speed, stopDistance));
-        keys |= reverse ? KEY_BACK : KEY_FORWARD;
+        keys |= KEY_FORWARD;
 
         boolean braking = false;
         if (!intermediateWaypoint && horizontalDistance < brakeStart) {
@@ -859,29 +848,13 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
     private static short finalApproachKeys(float yawDelta, float absYawDelta, double horizontalDistance, double stopDistance, double speed, VehicleProfile profile) {
         short keys = 0;
-        boolean reverse = absYawDelta > 55.0F;
         if (absYawDelta > STEER_DEAD_ZONE) {
-            if (reverse) keys |= yawDelta > 0 ? KEY_LEFT : KEY_RIGHT;
-            else keys |= yawDelta > 0 ? KEY_RIGHT : KEY_LEFT;
+            keys |= yawDelta > 0 ? KEY_RIGHT : KEY_LEFT;
         }
 
         double brakeStart = sourceBasedBrakeDistance(speed, stopDistance);
-        double hardAlignDistance = Math.max(6.0D, profile.length + 2.0D);
-        boolean moderatelyMisaligned = absYawDelta > 32.0F;
-
         boolean braking = false;
-        if (reverse) {
-            keys |= KEY_BACK;
-        } else if (moderatelyMisaligned) {
-            if (speed > 0.18D || horizontalDistance <= hardAlignDistance) {
-                keys |= KEY_BRAKE_OR_UP;
-                braking = true;
-            } else {
-                keys |= KEY_FORWARD;
-            }
-        } else {
-            keys |= KEY_FORWARD;
-        }
+        keys |= KEY_FORWARD;
 
         if (horizontalDistance <= stopDistance + 0.15D || horizontalDistance <= brakeStart) {
             keys |= KEY_BRAKE_OR_UP;
@@ -2021,7 +1994,10 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     private static Vec3 findSimpleOccupiableAtHeight(Entity vehicle, Vec3 around, VehicleProfile profile, double baseY) {
         for (double dy : profile.simpleStepCandidates) {
             Vec3 candidate = new Vec3(around.x, baseY + dy, around.z);
-            if (canOccupySimpleVehicleSpace(vehicle, candidate, profile)) return candidate;
+            // The simple grid used to test a square with radius equal to half the car's
+            // *length*.  That rejects normal narrow lanes before the steering system even gets
+            // a chance to turn. Use Superb Warfare's collision OBB at the current heading.
+            if (canOccupyVehicleSpace(vehicle, candidate, vehicle.getYRot(), profile)) return candidate;
         }
         return null;
     }
@@ -2048,8 +2024,9 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
     private static Vec3 safeTargetNear(Entity vehicle, Vec3 finalTarget, VehicleProfile profile) {
         Vec3 direct = findSimpleOccupiablePosition(vehicle, finalTarget, profile);
-        if (direct != null) return direct;
         Vec3 origin = vehicle.position();
+        if (direct != null && canTravelDirect(vehicle, origin, direct, profile,
+                Math.max(AVOIDANCE_LOOKAHEAD, flatDistance(origin, direct) + profile.length))) return direct;
         Vec3 toTarget = finalTarget.subtract(origin).multiply(1.0D, 0.0D, 1.0D);
         Vec3 forward = toTarget.lengthSqr() > 1.0E-6D ? toTarget.normalize() : Vec3.directionFromRotation(0.0F, vehicle.getYRot()).multiply(1.0D, 0.0D, 1.0D);
         if (forward.lengthSqr() < 1.0E-6D) forward = new Vec3(0.0D, 0.0D, 1.0D);
@@ -2070,18 +2047,15 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         }
         if (!candidates.isEmpty()) {
             candidates.sort(Comparator.comparingDouble(SafeCandidate::score));
-            SafeCandidate best = candidates.get(0);
-            int checkLimit = Math.min(5, candidates.size());
-            for (int i = 0; i < checkLimit; i++) {
-                SafeCandidate candidate = candidates.get(i);
+            for (SafeCandidate candidate : candidates) {
                 double travelDistance = flatDistance(origin, candidate.position());
                 if (canTravelDirect(vehicle, origin, candidate.position(), profile, Math.max(AVOIDANCE_LOOKAHEAD, travelDistance + profile.length))) {
-                    double score = candidate.score() - 16.0D;
-                    if (score < best.score()) best = new SafeCandidate(candidate.position(), score);
-                    break;
+                    pathDebug(vehicle, "SAFE_TARGET_ADJUSTED", "final=%s safe=%s score=%.2f candidates=%d profile=%s", fmt(finalTarget), fmt(candidate.position()), candidate.score(), candidates.size(), profileSummary(profile));
+                    return candidate.position();
                 }
             }
-            pathDebug(vehicle, "SAFE_TARGET_ADJUSTED", "final=%s safe=%s score=%.2f candidates=%d profile=%s", fmt(finalTarget), fmt(best.position()), best.score(), candidates.size(), profileSummary(profile));
+            SafeCandidate best = candidates.get(0);
+            pathDebug(vehicle, "SAFE_TARGET_DEFERRED", "final=%s safe=%s score=%.2f candidates=%d profile=%s", fmt(finalTarget), fmt(best.position()), best.score(), candidates.size(), profileSummary(profile));
             return best.position();
         }
         pathDebug(vehicle, "SAFE_TARGET_FALLBACK_RAW", "final=%s profile=%s", fmt(finalTarget), profileSummary(profile));
@@ -2192,10 +2166,11 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
     private static boolean canSweepSimplePose(Entity vehicle, Vec3 from, Vec3 to, VehicleProfile profile) {
         int steps = Math.max(2, Mth.ceil(from.distanceTo(to) / Math.max(1.5D, profile.length * 0.5D)));
+        float travelYaw = yawTo(from, to);
         for (int i = 1; i <= steps; i++) {
             double t = i / (double) steps;
             Vec3 sample = from.lerp(to, t);
-            if (!canOccupySimpleVehicleSpace(vehicle, sample, profile)) return false;
+            if (!canOccupyVehicleSpace(vehicle, sample, travelYaw, profile)) return false;
         }
         return true;
     }
@@ -2334,8 +2309,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     }
 
     private static boolean canOccupySimpleVehicleSpace(Entity vehicle, Vec3 predictedPosition, VehicleProfile profile) {
-        return canOccupyVoxelVehicleSpace(vehicle, predictedPosition, profile)
-                && !collidesWithOtherVehicleSimple(vehicle, predictedPosition, profile);
+        return canOccupyVehicleSpace(vehicle, predictedPosition, vehicle.getYRot(), profile);
     }
 
     private static boolean canOccupyVoxelVehicleSpace(Entity vehicle, Vec3 predictedPosition, VehicleProfile profile) {
