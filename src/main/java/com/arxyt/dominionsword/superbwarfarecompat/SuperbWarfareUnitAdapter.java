@@ -584,7 +584,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
                 return true;
             }
             LagTrace.mark("yield_check");
-            DriveDecision driveDecision = decideDriveMode(vehicle, yawDelta, absYawDelta, horizontalDistance, speed, profile, wideTurnAvailable, finalApproach);
+            DriveDecision driveDecision = decideDriveMode(vehicle, yawDelta, absYawDelta, horizontalDistance, speed, profile, wideTurnAvailable, finalApproach, intermediateWaypoint);
             LagTrace.mark("drive_decision:" + driveDecision.mode().name());
         data.putString(PILOT_DRIVE_MODE, driveDecision.mode().name());
         if (vehicle.horizontalCollision && reverseTicks <= 0) {
@@ -611,7 +611,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
                 intermediateWaypoint = true;
                 activeArrivalDistance = routePointReach(profile);
                 wideTurnAvailable = absYawDelta >= FORWARD_ARC && canWideTurn(vehicle, yawDelta, profile);
-                driveDecision = decideDriveMode(vehicle, yawDelta, absYawDelta, horizontalDistance, speed, profile, wideTurnAvailable, false);
+                driveDecision = decideDriveMode(vehicle, yawDelta, absYawDelta, horizontalDistance, speed, profile, wideTurnAvailable, false, true);
                 data.putString(PILOT_DRIVE_MODE, driveDecision.mode().name());
             } else if (driveDecision.mode() == DriveMode.THREE_POINT && !data.getBoolean(PILOT_THREE_POINT_ACTIVE)) {
                 startThreePointTurn(data, yawDelta);
@@ -758,7 +758,8 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     private record DriveDecision(DriveMode mode, double forwardEta, double reverseEta, double turnAroundEta) {}
 
     private static DriveDecision decideDriveMode(Entity vehicle, float yawDelta, float absYawDelta, double horizontalDistance,
-                                                double speed, VehicleProfile profile, boolean wideTurnAvailable, boolean finalApproach) {
+                                                double speed, VehicleProfile profile, boolean wideTurnAvailable, boolean finalApproach,
+                                                boolean intermediateWaypoint) {
         double turnRadius = estimatedTurnRadius(profile);
         boolean tracked = isTrackedVehicle(vehicle);
         boolean wheeled = !tracked && turnRadius > 3.0D;
@@ -792,7 +793,11 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
         boolean shortReverseTarget = absYawDelta >= SIDE_REVERSE_ANGLE && horizontalDistance <= shortReverseDistance;
         boolean cannotArcToTarget = wheeled && absYawDelta >= 45.0F && horizontalDistance <= Math.max(turnRadius * 2.0D, profile.length * 2.5D);
-        boolean shouldThreePoint = !shortReverseTarget && cannotArcToTarget && !threePointCooldown;
+        // A route waypoint is a steering hint, not a destination at which the vehicle
+        // must turn around.  Treating every short, angled waypoint as a blocked turn
+        // made wheeled vehicles alternate between forward and reverse on ordinary roads.
+        boolean shouldThreePoint = shouldUseThreePointTurn(wheeled, shortReverseTarget, cannotArcToTarget,
+                threePointCooldown, intermediateWaypoint);
         DriveMode mode;
         if (shortReverseTarget) {
             mode = DriveMode.REVERSE_SHORT;
@@ -806,6 +811,11 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             mode = DriveMode.FORWARD;
         }
         return new DriveDecision(mode, forwardEta, reverseEta, turnAroundEta);
+    }
+
+    static boolean shouldUseThreePointTurn(boolean wheeled, boolean shortReverseTarget, boolean cannotArcToTarget,
+                                           boolean threePointCooldown, boolean intermediateWaypoint) {
+        return wheeled && !shortReverseTarget && cannotArcToTarget && !threePointCooldown && !intermediateWaypoint;
     }
 
     private static double estimatedTurnRadius(VehicleProfile profile) {

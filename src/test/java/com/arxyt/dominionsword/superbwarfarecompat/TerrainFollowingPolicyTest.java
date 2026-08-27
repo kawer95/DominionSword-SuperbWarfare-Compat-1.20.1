@@ -24,4 +24,10 @@ class TerrainFollowingPolicyTest {
         assertFalse(SuperbWarfareUnitAdapter.terrainStepAllowed(64.0D, 62.5D));
         assertEquals(3.15D, SuperbWarfareUnitAdapter.terrainGridStepHeight(0.0D), 1.0E-9D);
     }
+
+    @Test
+    void doesNotThreePointTurnForAnAngledRouteWaypoint() {
+        assertFalse(SuperbWarfareUnitAdapter.shouldUseThreePointTurn(true, false, true, false, true));
+        assertTrue(SuperbWarfareUnitAdapter.shouldUseThreePointTurn(true, false, true, false, false));
+    }
 }
