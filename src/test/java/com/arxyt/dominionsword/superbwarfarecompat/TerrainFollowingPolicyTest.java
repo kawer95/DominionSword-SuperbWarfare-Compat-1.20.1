@@ -39,4 +39,12 @@ class TerrainFollowingPolicyTest {
         assertFalse(SuperbWarfareUnitAdapter.shouldPivotTrackedVehicle(true, 90.0F, 40.0D, 18.0D, true));
         assertFalse(SuperbWarfareUnitAdapter.shouldPivotTrackedVehicle(false, 90.0F, 8.0D, 18.0D, false));
     }
+
+    @Test
+    void triesTrackedEscapePivotBeforeDetouringAroundAStall() {
+        assertTrue(SuperbWarfareUnitAdapter.shouldAttemptTrackedEscapePivot(true, true, 0, 20));
+        assertTrue(SuperbWarfareUnitAdapter.shouldAttemptTrackedEscapePivot(true, false, 20, 20));
+        assertFalse(SuperbWarfareUnitAdapter.shouldAttemptTrackedEscapePivot(true, false, 19, 20));
+        assertFalse(SuperbWarfareUnitAdapter.shouldAttemptTrackedEscapePivot(false, true, 20, 20));
+    }
 }

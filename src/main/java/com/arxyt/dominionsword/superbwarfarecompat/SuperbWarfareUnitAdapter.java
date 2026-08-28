@@ -67,6 +67,8 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     private static final float TURN_ONLY_ARC = 105.0F;
     private static final float TRACKED_PIVOT_ANGLE = 55.0F;
     private static final float TRACKED_PIVOT_CORNER_ANGLE = 82.0F;
+    private static final float TRACKED_ESCAPE_MIN_ANGLE = 28.0F;
+    private static final long TRACKED_ESCAPE_PIVOT_TICKS = 50L;
     private static final float REVERSE_NAV_ENTER_ARC = 150.0F;
     private static final float SIDE_REVERSE_ANGLE = 100.0F;
     private static final float REVERSE_NAV_EXIT_ARC = 70.0F;
@@ -120,6 +122,8 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     private static final String PILOT_REVERSE_STEER = "DominionSwordSuperbPilotReverseSteer";
     private static final String PILOT_REVERSE_NAV_TICKS = "DominionSwordSuperbPilotReverseNavTicks";
     private static final String PILOT_REVERSE_NAV_STEER = "DominionSwordSuperbPilotReverseNavSteer";
+    private static final String PILOT_TRACKED_ESCAPE_PIVOT_YAW = "DominionSwordSuperbPilotTrackedEscapePivotYaw";
+    private static final String PILOT_TRACKED_ESCAPE_PIVOT_UNTIL = "DominionSwordSuperbPilotTrackedEscapePivotUntil";
     private static final String PILOT_THREE_POINT_ACTIVE = "DominionSwordSuperbPilotThreePointActive";
     private static final String PILOT_THREE_POINT_STEP = "DominionSwordSuperbPilotThreePointStep";
     private static final String PILOT_THREE_POINT_STEP_TICKS = "DominionSwordSuperbPilotThreePointStepTicks";
@@ -540,6 +544,12 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
                 return true;
             }
             LagTrace.mark("capture_checks");
+            int escapeStuckThreshold = intermediateWaypoint ? 10 : 20 + Math.floorMod(vehicle.getId(), 10);
+            if (applyTrackedEscapePivot(mob, vehicle, data, target, profile,
+                    data.getInt(PILOT_NO_PROGRESS_TICKS), escapeStuckThreshold)) {
+                LagTrace.mark("process_input:track_escape_pivot");
+                return true;
+            }
             if (intermediateWaypoint && data.getInt(PILOT_NO_PROGRESS_TICKS) >= 10 && speed < 0.08D) {
             Vec3 egress = findEmergencyEgressWaypoint(vehicle, finalTarget, profile);
             if (egress != null && flatDistance(vehicle.position(), egress) > activeArrivalDistance + 0.75D) {
@@ -844,6 +854,77 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         if (horizontalDistance <= pivotRange) return true;
         return narrowIntermediateCorner && absYawDelta >= TRACKED_PIVOT_CORNER_ANGLE
                 && horizontalDistance <= pivotRange * 1.5D;
+    }
+
+    static boolean shouldAttemptTrackedEscapePivot(boolean tracked, boolean horizontalCollision, int noProgressTicks,
+                                                   int stuckThreshold) {
+        return tracked && (horizontalCollision || noProgressTicks >= stuckThreshold);
+    }
+
+    /**
+     * Escape a local obstruction before asking the planner for an egress route.  The stored
+     * heading makes the vehicle finish one deliberate pivot instead of oscillating on the spot.
+     */
+    private static boolean applyTrackedEscapePivot(Mob mob, Entity vehicle, CompoundTag data, Vec3 target,
+                                                   VehicleProfile profile, int noProgressTicks, int stuckThreshold) {
+        float pivotYaw = activeTrackedEscapePivotYaw(vehicle, data, target, profile, noProgressTicks, stuckThreshold);
+        if (!Float.isFinite(pivotYaw)) return false;
+        float yawDelta = Mth.wrapDegrees(pivotYaw - vehicle.getYRot());
+        short keys = trackedPivotKeys(yawDelta);
+        clearThreePointState(data);
+        data.remove(PILOT_REVERSE_TICKS);
+        data.remove(PILOT_REVERSE_STEER);
+        data.remove(PILOT_REVERSE_NAV_TICKS);
+        data.remove(PILOT_REVERSE_NAV_STEER);
+        data.putInt(PILOT_NO_PROGRESS_TICKS, 0);
+        data.putString(PILOT_DRIVE_MODE, "TRACK_ESCAPE_PIVOT");
+        LOGGER.info("[DS-SW-ESCAPE-PIVOT] vehicle={} target={} pivotYaw={} yawDiff={} collision={} keys={}",
+                vehicle.getStringUUID(), fmt(target), String.format(Locale.ROOT, "%.1f", pivotYaw),
+                String.format(Locale.ROOT, "%.1f", yawDelta), vehicle.horizontalCollision, (int) keys);
+        pathDebug(mob, vehicle, "TRACK_ESCAPE_PIVOT", "target=%s pivotYaw=%.1f yawDiff=%.1f collision=%s keys=%d",
+                fmt(target), pivotYaw, yawDelta, vehicle.horizontalCollision, (int) keys);
+        processInput(vehicle, keys);
+        return true;
+    }
+
+    private static float activeTrackedEscapePivotYaw(Entity vehicle, CompoundTag data, Vec3 target,
+                                                      VehicleProfile profile, int noProgressTicks, int stuckThreshold) {
+        long now = vehicle.level().getGameTime();
+        if (data.contains(PILOT_TRACKED_ESCAPE_PIVOT_YAW) && now <= data.getLong(PILOT_TRACKED_ESCAPE_PIVOT_UNTIL)) {
+            float storedYaw = data.getFloat(PILOT_TRACKED_ESCAPE_PIVOT_YAW);
+            if (Math.abs(Mth.wrapDegrees(storedYaw - vehicle.getYRot())) > STEER_DEAD_ZONE) return storedYaw;
+            clearTrackedEscapePivot(data);
+        } else {
+            clearTrackedEscapePivot(data);
+        }
+        if (!shouldAttemptTrackedEscapePivot(isTrackedVehicle(vehicle), vehicle.horizontalCollision,
+                noProgressTicks, stuckThreshold)) return Float.NaN;
+
+        float chosenYaw = chooseTrackedEscapeYaw(vehicle, target, profile);
+        if (!Float.isFinite(chosenYaw)) return Float.NaN;
+        data.putFloat(PILOT_TRACKED_ESCAPE_PIVOT_YAW, chosenYaw);
+        data.putLong(PILOT_TRACKED_ESCAPE_PIVOT_UNTIL, now + TRACKED_ESCAPE_PIVOT_TICKS);
+        return chosenYaw;
+    }
+
+    private static float chooseTrackedEscapeYaw(Entity vehicle, Vec3 target, VehicleProfile profile) {
+        float desiredYaw = yawTo(vehicle.position(), target);
+        float currentYaw = vehicle.getYRot();
+        double probeDistance = Mth.clamp(profile.length * 0.75D + 1.0D, 3.0D, 8.0D);
+        float[] offsets = {0.0F, 30.0F, -30.0F, 50.0F, -50.0F, 70.0F, -70.0F};
+        for (float offset : offsets) {
+            float candidateYaw = Mth.wrapDegrees(desiredYaw + offset);
+            if (Math.abs(Mth.wrapDegrees(candidateYaw - currentYaw)) < TRACKED_ESCAPE_MIN_ANGLE) continue;
+            Vec3 forward = Vec3.directionFromRotation(0.0F, candidateYaw).multiply(1.0D, 0.0D, 1.0D).normalize();
+            Vec3 probe = vehicle.position().add(forward.scale(probeDistance));
+            if (canSweepPose(vehicle, vehicle.position(), candidateYaw, probe, candidateYaw, profile)) return candidateYaw;
+        }
+        return Float.NaN;
+    }
+
+    private static void clearTrackedEscapePivot(CompoundTag data) {
+        data.remove(PILOT_TRACKED_ESCAPE_PIVOT_YAW);
+        data.remove(PILOT_TRACKED_ESCAPE_PIVOT_UNTIL);
     }
 
     private static double trackedPivotRange(VehicleProfile profile) {
@@ -3111,6 +3192,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         data.remove(PILOT_REVERSE_STEER);
         data.remove(PILOT_REVERSE_NAV_TICKS);
         data.remove(PILOT_REVERSE_NAV_STEER);
+        clearTrackedEscapePivot(data);
         data.remove(PILOT_TARGET_X);
         data.remove(PILOT_TARGET_Z);
         data.remove(PILOT_CAPTURED_TARGET_X);
@@ -3178,6 +3260,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         data.remove(PILOT_REVERSE_STEER);
         data.remove(PILOT_REVERSE_NAV_TICKS);
         data.remove(PILOT_REVERSE_NAV_STEER);
+        clearTrackedEscapePivot(data);
         clearThreePointState(data);
     }
 
