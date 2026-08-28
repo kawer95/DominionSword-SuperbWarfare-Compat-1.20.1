@@ -65,6 +65,8 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     private static final float STEER_DEAD_ZONE = 6.0F;
     private static final float FORWARD_ARC = 42.0F;
     private static final float TURN_ONLY_ARC = 105.0F;
+    private static final float TRACKED_PIVOT_ANGLE = 55.0F;
+    private static final float TRACKED_PIVOT_CORNER_ANGLE = 82.0F;
     private static final float REVERSE_NAV_ENTER_ARC = 150.0F;
     private static final float SIDE_REVERSE_ANGLE = 100.0F;
     private static final float REVERSE_NAV_EXIT_ARC = 70.0F;
@@ -586,6 +588,28 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             LagTrace.mark("yield_check");
             DriveDecision driveDecision = decideDriveMode(vehicle, yawDelta, absYawDelta, horizontalDistance, speed, profile, wideTurnAvailable, finalApproach, intermediateWaypoint);
             LagTrace.mark("drive_decision:" + driveDecision.mode().name());
+            boolean trackedPivot = shouldPivotTrackedVehicle(isTrackedVehicle(vehicle), absYawDelta, horizontalDistance,
+                    trackedPivotRange(profile), intermediateWaypoint && !wideTurnAvailable);
+            if (trackedPivot) {
+                clearThreePointState(data);
+                data.remove(PILOT_REVERSE_TICKS);
+                data.remove(PILOT_REVERSE_STEER);
+                data.remove(PILOT_REVERSE_NAV_TICKS);
+                data.remove(PILOT_REVERSE_NAV_STEER);
+                data.putInt(PILOT_NO_PROGRESS_TICKS, 0);
+                data.putString(PILOT_DRIVE_MODE, DriveMode.TRACK_PIVOT.name());
+                // Superb Warfare's Track engine rotates in place when it receives a turn key
+                // without forward/backward power.  This keeps the hull out of narrow walls at
+                // a close right-angle route point.
+                short keys = trackedPivotKeys(yawDelta);
+                logDecision(vehicle, DriveMode.TRACK_PIVOT, false, finalApproach, intermediateWaypoint,
+                        target, finalTarget, yawDelta, absYawDelta, horizontalDistance, speed, estimatedTurnRadius(profile), wideTurnAvailable,
+                        isShortReverseTarget(absYawDelta, horizontalDistance, profile), cannotArcToTarget(absYawDelta, horizontalDistance, profile), keys);
+                LagTrace.mark("keys:track_pivot=" + keys);
+                processInput(vehicle, keys);
+                LagTrace.mark("process_input:track_pivot");
+                return true;
+            }
         data.putString(PILOT_DRIVE_MODE, driveDecision.mode().name());
         if (vehicle.horizontalCollision && reverseTicks <= 0) {
             data.putString(PILOT_ROUTE_MODE, ROUTE_MODE_STUCK);
@@ -750,6 +774,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
     private enum DriveMode {
         FORWARD,
+        TRACK_PIVOT,
         REVERSE_SHORT,
         TURN_AROUND,
         THREE_POINT
@@ -809,6 +834,22 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         return false;
     }
 
+    /**
+     * Keep a tracked vehicle rolling for a distant target or a small correction.  At a close
+     * bend it can use its native differential steering to rotate before entering the corridor.
+     */
+    static boolean shouldPivotTrackedVehicle(boolean tracked, float absYawDelta, double horizontalDistance,
+                                             double pivotRange, boolean narrowIntermediateCorner) {
+        if (!tracked || absYawDelta < TRACKED_PIVOT_ANGLE) return false;
+        if (horizontalDistance <= pivotRange) return true;
+        return narrowIntermediateCorner && absYawDelta >= TRACKED_PIVOT_CORNER_ANGLE
+                && horizontalDistance <= pivotRange * 1.5D;
+    }
+
+    private static double trackedPivotRange(VehicleProfile profile) {
+        return Mth.clamp(profile.length * 2.5D + 5.0D, 12.0D, 24.0D);
+    }
+
     private static double estimatedTurnRadius(VehicleProfile profile) {
         return profile.forwardStep / Math.max(0.01D, Math.toRadians(profile.yawStep));
     }
@@ -862,6 +903,10 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         }
         if (braking) keys = brakeOnly(keys);
         return keys;
+    }
+
+    private static short trackedPivotKeys(float yawDelta) {
+        return yawDelta >= 0.0F ? KEY_RIGHT : KEY_LEFT;
     }
 
     private static short brakeOnly(short keys) {

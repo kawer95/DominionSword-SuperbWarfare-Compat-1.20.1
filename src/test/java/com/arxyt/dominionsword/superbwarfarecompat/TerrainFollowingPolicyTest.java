@@ -30,4 +30,13 @@ class TerrainFollowingPolicyTest {
         assertFalse(SuperbWarfareUnitAdapter.shouldUseThreePointTurn(true, false, true, false, true));
         assertFalse(SuperbWarfareUnitAdapter.shouldUseThreePointTurn(true, false, true, false, false));
     }
+
+    @Test
+    void pivotsTrackedVehiclesOnlyForCloseLargeTurns() {
+        assertTrue(SuperbWarfareUnitAdapter.shouldPivotTrackedVehicle(true, 90.0F, 14.0D, 18.0D, false));
+        assertTrue(SuperbWarfareUnitAdapter.shouldPivotTrackedVehicle(true, 90.0F, 26.0D, 18.0D, true));
+        assertFalse(SuperbWarfareUnitAdapter.shouldPivotTrackedVehicle(true, 42.0F, 8.0D, 18.0D, false));
+        assertFalse(SuperbWarfareUnitAdapter.shouldPivotTrackedVehicle(true, 90.0F, 40.0D, 18.0D, true));
+        assertFalse(SuperbWarfareUnitAdapter.shouldPivotTrackedVehicle(false, 90.0F, 8.0D, 18.0D, false));
+    }
 }
