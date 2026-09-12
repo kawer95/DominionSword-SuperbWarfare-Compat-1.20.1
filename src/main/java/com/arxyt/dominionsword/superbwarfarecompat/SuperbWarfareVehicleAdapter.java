@@ -265,6 +265,49 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
     }
 
     @Override
+    public boolean supportsPlayerBoarding(ServerPlayer player, Entity vehicle, int seat) {
+        return player != null && player.isAlive() && supports(vehicle) && seat >= 0
+                && seats(vehicle).stream().anyMatch(view -> view.index() == seat);
+    }
+
+    @Override
+    public boolean boardPlayer(ServerPlayer player, Entity vehicle, int seat, boolean force) {
+        if (!supportsPlayerBoarding(player, vehicle, seat)) return false;
+        Entity occupant = readEntity(invoke(vehicle, "getNthEntity", new Class<?>[]{int.class}, seat));
+        if (occupant != null && occupant != player) {
+            if (!force || !com.arxyt.dominionsword.api.VehicleDismounts.dismount(vehicle, occupant)) return false;
+        }
+        Object previousOverride = readMember(vehicle, "entityIndexOverride");
+        boolean overrideSet = writeMember(vehicle, "entityIndexOverride", (Function<Entity, Integer>) entity -> entity == player ? seat : -1);
+        boolean ridden;
+        try {
+            ridden = player.getVehicle() == vehicle || player.startRiding(vehicle, true);
+        } finally {
+            if (overrideSet) writeMember(vehicle, "entityIndexOverride", previousOverride);
+        }
+        if (!ridden) return false;
+        Entity seated = readEntity(invoke(vehicle, "getNthEntity", new Class<?>[]{int.class}, seat));
+        if (seated == player) return true;
+        return Boolean.TRUE.equals(invoke(vehicle, "changeSeat", new Class<?>[]{Entity.class, int.class}, player, seat));
+    }
+
+    @Override
+    public Vec3 playerBoardingPosition(ServerPlayer player, Entity vehicle) {
+        OrientedBox obb = boardingObb(vehicle);
+        if (obb == null) return DominionVehicleAdapter.super.playerBoardingPosition(player, vehicle);
+        Vec3 point = obb.inflate(1.0D, 0.25D, 1.0D).closestPoint(player.position());
+        return new Vec3(point.x, vehicle.getY(), point.z);
+    }
+
+    @Override
+    public boolean canPlayerBoardFrom(ServerPlayer player, Entity vehicle) {
+        OrientedBox obb = boardingObb(vehicle);
+        if (obb == null) return DominionVehicleAdapter.super.canPlayerBoardFrom(player, vehicle);
+        OrientedBox access = obb.inflate(1.75D, 1.0D, 1.75D);
+        return access.intersects(player.getBoundingBox()) || access.horizontalDistanceSqr(player.position()) <= 9.0D;
+    }
+
+    @Override
     public Vec3 boardingPosition(Mob unit, Entity vehicle) {
         OrientedBox obb = boardingObb(vehicle);
         if (obb == null) return DominionVehicleAdapter.super.boardingPosition(unit, vehicle);
