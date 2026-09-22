@@ -3,6 +3,7 @@ package com.arxyt.dominionsword.superbwarfarecompat;
 import com.arxyt.dominionsword.api.DominionUnitAdapter;
 import com.arxyt.dominionsword.api.DominionControlApi;
 import com.arxyt.dominionsword.api.DominionAsyncGridPlanner;
+import com.arxyt.dominionsword.api.DominionPathBudget;
 import com.mojang.logging.LogUtils;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
@@ -332,8 +333,9 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
                 route = findAvoidancePath(vehicle, vehicle.position(), avoidanceRouteTarget(vehicle.position(), safeTarget), profile,
                         avoidanceRouteSearchRadius(vehicle.position(), safeTarget), avoidanceRouteIterations(avoidanceRouteSearchRadius(vehicle.position(), safeTarget)));
                 if (route.size() > 2) route = simplifyAvoidanceRoute(vehicle, route, profile);
-                if (route == null || route.size() <= 1) route = List.of(vehicle.position(), safeTarget);
-                else if (flatDistance(route.get(route.size() - 1), safeTarget) > 1.0D) route = appendedRoute(route, safeTarget);
+                if (route == null || route.size() <= 1) route = List.of(vehicle.position(), vehicle.position());
+                else if (flatDistance(route.get(route.size() - 1), safeTarget) > 1.0D
+                        && canSweepSimplePose(vehicle, route.get(route.size() - 1), safeTarget, profile)) route = appendedRoute(route, safeTarget);
             } else {
                 route = List.of(vehicle.position(), safeTarget);
             }
@@ -1386,7 +1388,10 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     }
 
     private static boolean startAsyncRoute(Mob mob, Entity vehicle, Vec3 safe, VehicleProfile profile, long generation) {
-        if (ASYNC_ROUTES.containsKey(vehicle.getUUID())) return true;
+        AsyncRouteBuild previous = ASYNC_ROUTES.get(vehicle.getUUID());
+        if (previous != null && previous.generation == generation) return true;
+        if (previous != null && previous.future != null) previous.future.cancel(false);
+        ASYNC_ROUTES.remove(vehicle.getUUID());
         int radius = Math.min(28, (int) Math.ceil(AVOIDANCE_SEARCH_RADIUS / AVOIDANCE_STEP));
         Vec3 start = vehicle.position();
         int gx = Mth.clamp((int) Math.round((safe.x - start.x) / AVOIDANCE_STEP), -radius, radius);
@@ -1396,36 +1401,62 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     }
 
     private static void advanceAsyncRoute(Mob mob, Entity vehicle, Vec3 commandTarget, VehicleProfile profile) {
+        try (DominionPathBudget.Scope planningBudget = DominionPathBudget.acquire(vehicle.getServer(), vehicle.getServer().getTickCount(), vehicle.getUUID().toString() + ":snapshot")) {
+            if (planningBudget == null) return;
+
         AsyncRouteBuild build = ASYNC_ROUTES.get(vehicle.getUUID());
         CompoundTag data = mob.getPersistentData();
         if (build == null || !build.pilot.equals(mob.getUUID()) || build.generation != data.getLong(PILOT_ROUTE_GENERATION)) { data.remove(PILOT_ASYNC_ROUTE_PENDING); return; }
         if (build.future == null) {
             int budget = ASYNC_SNAPSHOT_CELLS_PER_TICK;
-            while (budget-- > 0 && build.cursor < build.points.size()) {
+            while (budget-- > 0 && build.cursor < Math.min(build.sampleLimit, build.points.size()) && planningBudget.step()) {
                 DominionAsyncGridPlanner.Point point = build.points.get(build.cursor++);
                 Vec3 raw = build.start.add(point.x() * AVOIDANCE_STEP, 0.0D, point.z() * AVOIDANCE_STEP);
                 Vec3 occupy = findSimpleOccupiablePosition(vehicle, raw, build.profile);
                 if (occupy != null) build.cells.put(point.key(), new DominionAsyncGridPlanner.Cell(occupy.y, terrainCost(vehicle, occupy)));
             }
-            if (build.cursor < build.points.size()) return;
+            if (build.cursor < Math.min(build.sampleLimit, build.points.size())) return;
+            if (!planningBudget.step()) return;
             build.future = DominionAsyncGridPlanner.submit(new DominionAsyncGridPlanner.Snapshot(new DominionAsyncGridPlanner.Point(0, 0), new DominionAsyncGridPlanner.Point(build.goalX, build.goalZ), Map.copyOf(build.cells), AVOIDANCE_MAX_ITERATIONS, terrainGridStepHeight(build.profile.maxStepUp), 2.0D));
             return;
         }
         if (!build.future.isDone()) return;
         DominionAsyncGridPlanner.Result result = build.future.getNow(null);
-        ASYNC_ROUTES.remove(vehicle.getUUID());
-        data.remove(PILOT_ASYNC_ROUTE_PENDING);
-        if (result == null || !result.found()) { clearAvoidanceState(data); return; }
-        List<Vec3> route = new ArrayList<>();
-        for (DominionAsyncGridPlanner.Point point : result.points()) {
-            DominionAsyncGridPlanner.Cell cell = build.cells.get(point.key());
-            if (cell != null) route.add(new Vec3(build.start.x + point.x() * AVOIDANCE_STEP, cell.y(), build.start.z + point.z() * AVOIDANCE_STEP));
+        if ((result == null || !result.found()) && build.sampleLimit < build.points.size()) {
+            build.sampleLimit = com.arxyt.dominionsword.api.DominionRouteSampling.nextLimit(build.sampleLimit, build.points.size());
+            build.future = null;
+            return;
         }
-        if (route.size() <= 1 || !validateAsyncRoute(vehicle, route, build.profile)) { clearAvoidanceState(data); return; }
-        if (flatDistance(route.get(route.size() - 1), build.safe) > 1.0D) route.add(build.safe);
-        storeAvoidanceRoute(data, build.safe, route, firstUsefulWaypointIndex(route, vehicle.position(), build.profile), build.generation);
-        refreshPlannedPath(mob, vehicle, route);
-        pathDebug(mob, vehicle, "ASYNC_ROUTE_APPLIED", "generation=%d cells=%d visited=%d points=%d", build.generation, build.cells.size(), result.visited(), route.size());
+        if (result == null || !result.usable()) {
+            ASYNC_ROUTES.remove(vehicle.getUUID()); data.remove(PILOT_ASYNC_ROUTE_PENDING); clearAvoidanceState(data); return;
+        }
+        if (build.candidate == null) {
+            build.candidate = new ArrayList<>();
+            for (DominionAsyncGridPlanner.Point point : result.points()) {
+                DominionAsyncGridPlanner.Cell cell = build.cells.get(point.key());
+                if (cell != null) build.candidate.add(new Vec3(build.start.x + point.x()*AVOIDANCE_STEP,cell.y(),build.start.z + point.z()*AVOIDANCE_STEP));
+            }
+            // Append only a short final connection; it goes through the same incremental validation.
+            Vec3 last = build.candidate.get(build.candidate.size()-1);
+            if (last.distanceToSqr(build.safe) <= 36 && last.distanceToSqr(build.safe) > .01) build.candidate.add(build.safe);
+        }
+        while (build.validated < build.candidate.size()) {
+            if (!planningBudget.step()) return;
+            Vec3 from=build.candidate.get(build.validated-1), to=build.candidate.get(build.validated);
+            if (!canSweepSimplePose(vehicle, from, to, build.profile)) {
+                // A rejected exact-end connector leaves a valid partial path; an interior rejection invalidates it.
+                if (build.validated == build.candidate.size()-1 && to.equals(build.safe) && build.validated > 1) {
+                    build.candidate.remove(build.validated); break;
+                }
+                ASYNC_ROUTES.remove(vehicle.getUUID()); data.remove(PILOT_ASYNC_ROUTE_PENDING); clearAvoidanceState(data); return;
+            }
+            build.validated++;
+        }
+        ASYNC_ROUTES.remove(vehicle.getUUID()); data.remove(PILOT_ASYNC_ROUTE_PENDING);
+        storeAvoidanceRoute(data, build.safe, build.candidate, firstUsefulWaypointIndex(build.candidate, vehicle.position(), build.profile), build.generation);
+        refreshPlannedPath(mob, vehicle, build.candidate);
+
+        }
     }
 
     private static boolean validateAsyncRoute(Entity vehicle, List<Vec3> route, VehicleProfile profile) {
@@ -1435,6 +1466,11 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
     private static void ensurePreparedRoute(Mob mob, Entity vehicle, Vec3 commandTarget, VehicleProfile profile) {
         CompoundTag data = mob.getPersistentData();
+        if (data.getBoolean(PILOT_ASYNC_ROUTE_PENDING) && !hasActiveSafeTarget(data, commandTarget)) {
+            AsyncRouteBuild old = ASYNC_ROUTES.remove(vehicle.getUUID());
+            if (old != null && old.future != null) old.future.cancel(false);
+            data.remove(PILOT_ASYNC_ROUTE_PENDING); clearAvoidanceRoute(data);
+        }
         if (data.getBoolean(PILOT_ASYNC_ROUTE_PENDING)) {
             advanceAsyncRoute(mob, vehicle, commandTarget, profile);
             return;
@@ -1541,7 +1577,8 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
                 continue;
             }
             data.putInt(PILOT_PATH_INDEX, index);
-            Vec3 carrot = routeLookaheadPoint(points, index, position, finalTarget, profile, speed);
+            Vec3 carrot = routeLookaheadPoint(vehicle, points, index, position, finalTarget, profile, speed);
+            if (carrot == null) { clearAvoidanceRoute(data); return null; }
             data.putDouble(PILOT_AVOID_X, carrot.x);
             data.putDouble(PILOT_AVOID_Y, carrot.y);
             data.putDouble(PILOT_AVOID_Z, carrot.z);
@@ -1551,24 +1588,21 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             return carrot;
         }
         clearAvoidanceRoute(data);
-        pathDebugThrottled(mob, vehicle, "ROUTE_COMPLETE_FINAL", "final=%s pos=%s dist=%.2f", fmt(finalTarget), fmt(position), flatDistance(position, finalTarget));
-        return finalTarget;
+        return flatDistance(position, finalTarget) <= Math.max(6, profile.length)
+                && canSweepSimplePose(vehicle, position, finalTarget, profile) ? finalTarget : null;
     }
 
-    private static Vec3 routeLookaheadPoint(ListTag points, int currentIndex, Vec3 position, Vec3 finalTarget, VehicleProfile profile, double speed) {
-        if (points == null || points.isEmpty()) return finalTarget;
+    private static Vec3 routeLookaheadPoint(Entity vehicle, ListTag points, int currentIndex, Vec3 position, Vec3 finalTarget, VehicleProfile profile, double speed) {
+        if (points == null || points.isEmpty()) return null;
         double lookahead = dynamicLookaheadDistance(speed, profile, false);
-        Vec3 previous = position;
-        double walked = 0.0D;
+        Vec3 visible = null;
         for (int i = Math.max(1, currentIndex); i < points.size(); i++) {
             Vec3 point = readPathPoint(points.getCompound(i));
-            if (point == null) break;
-            double segment = flatDistance(previous, point);
-            walked += segment;
-            if (walked >= lookahead) return point;
-            previous = point;
+            if (point == null || !canSweepSimplePose(vehicle, position, point, profile)) break;
+            visible = point;
+            if (flatDistance(position, point) >= lookahead) break;
         }
-        return finalTarget;
+        return visible;
     }
 
     private static boolean hasPassedRoutePoint(Vec3 position, Vec3 previousPoint, Vec3 point) {
@@ -1802,6 +1836,9 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     }
 
     private static List<Vec3> findAvoidancePath(Entity vehicle, Vec3 routeStart, Vec3 target, VehicleProfile profile, double searchRadius, int maxIterations) {
+        try (DominionPathBudget.Scope planningBudget = DominionPathBudget.acquire(vehicle.getServer(), vehicle.getServer().getTickCount(), vehicle.getUUID().toString() + ":local")) {
+            if (planningBudget == null) return List.of();
+
         try (LagTrace ignoredTrace = LagTrace.start("unit.astar", "vehicle=" + vehicle.getId() + " radius=" + String.format(Locale.ROOT, "%.1f", searchRadius) + " maxIter=" + maxIterations)) {
         Vec3 startPos = findSimpleOccupiablePosition(vehicle, routeStart, profile);
         if (startPos == null) startPos = routeStart;
@@ -1824,7 +1861,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         double bestH = heuristic(startNode, end);
         boolean reached = false;
         int occupyFail = 0, sweepFail = 0, radiusSkip = 0, closedSkip = 0, pushed = 1;
-        while (!open.isEmpty() && iterations++ < maxIterations) {
+        while (!open.isEmpty() && iterations++ < maxIterations && planningBudget.step()) {
             AvoidItem item = open.poll();
             AvoidNode current = item.node();
             if (!closed.add(current)) continue;
@@ -1842,14 +1879,17 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             Vec3 currentWorld = worldPos(startPos, current);
             Vec3 currentOccupy = current.equals(startNode) ? startPos : cachedSimpleOccupy(vehicle, currentWorld, current, profile, occupancyCache);
             if (currentOccupy == null) continue;
-            for (AvoidStep step : neighbors(current, profile)) {
+            for (AvoidStep step : (isWheeledVehicle(vehicle) ? driveNeighbors(current, profile) : neighbors(current, profile))) {
                 AvoidNode neighbor = step.node();
                 if (closed.contains(neighbor)) { closedSkip++; continue; }
                 Vec3 world = worldPos(startPos, neighbor);
                 if (world.distanceToSqr(startPos) > searchRadius * searchRadius) { radiusSkip++; continue; }
                 Vec3 occupy = cachedSimpleOccupy(vehicle, world, neighbor, profile, occupancyCache);
                 if (occupy == null) { occupyFail++; continue; }
-                if (!canSweepSimplePose(vehicle, currentOccupy, occupy, profile)) { sweepFail++; continue; }
+                boolean clear = isWheeledVehicle(vehicle)
+                        ? canSweepPose(vehicle, currentOccupy, yawFromBin(current.yaw()), occupy, yawFromBin(neighbor.yaw()), profile)
+                        : canSweepSimplePose(vehicle, currentOccupy, occupy, profile);
+                if (!clear) { sweepFail++; continue; }
                 double terrain = cachedTerrainCost(vehicle, occupy, terrainCache);
                 double reservationPenalty = foreignReservationPenalty(vehicle, occupy, profile);
                 double moveCost = step.cost();
@@ -1881,6 +1921,8 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         pathDebug(vehicle, "ASTAR_ROUTE", "start=%s target=%s iterations=%d closed=%d nodes=%s points=%s", fmt(startPos), fmt(target), iterations, closed.size(), path, fmtPath(result));
         LagTrace.mark("astar_route:closed=" + closed.size() + ":points=" + result.size());
         return result;
+        }
+
         }
     }
 
@@ -1967,7 +2009,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             if (item.cost() > currentCost + 1.0E-6D) continue;
             Vec3 currentOccupy = cachedSimpleOccupy(vehicle, worldPos(targetPos, current), current, profile, occupancyCache);
             if (currentOccupy == null) continue;
-            for (AvoidStep step : neighbors(current, profile)) {
+            for (AvoidStep step : (isWheeledVehicle(vehicle) ? driveNeighbors(current, profile) : neighbors(current, profile))) {
                 AvoidNode next = step.node();
                 if (!withinFlowBounds(next, limit)) continue;
                 Vec3 nextWorld = worldPos(targetPos, next);
@@ -2212,14 +2254,14 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     private static List<AvoidStep> driveNeighbors(AvoidNode node, VehicleProfile profile) {
         List<AvoidStep> result = new ArrayList<>(10);
         addDriveStep(result, node, 0, 1.0D, 1.0D);
-        addDriveStep(result, node, 1, 1.0D, 1.22D);
-        addDriveStep(result, node, -1, 1.0D, 1.22D);
+        double turnCells = Math.max(1, Math.ceil((profile.forwardStep / Math.max(.01, Math.toRadians(profile.yawStep))) * Math.toRadians(AVOIDANCE_YAW_STEP) / AVOIDANCE_STEP));
+        addDriveStep(result, node, 1, turnCells, turnCells * 1.22D);
+        addDriveStep(result, node, -1, turnCells, turnCells * 1.22D);
         addDriveStep(result, node, 0, 2.0D, 1.85D);
-        addDriveStep(result, node, 1, 2.0D, 2.15D);
-        addDriveStep(result, node, -1, 2.0D, 2.15D);
+
         addDriveStep(result, node, 0, -1.0D, 2.6D);
-        addDriveStep(result, node, 1, -1.0D, 3.0D);
-        addDriveStep(result, node, -1, -1.0D, 3.0D);
+        addDriveStep(result, node, 1, -turnCells, turnCells * 3.0D);
+        addDriveStep(result, node, -1, -turnCells, turnCells * 3.0D);
         return result;
     }
 
@@ -2349,7 +2391,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         List<Vec3> routeFrom(Entity vehicle, Vec3 start, VehicleProfile profile) { return routeFromFlowField(vehicle, start, profile, this); }
     }
     private record CachedWaypoint(Vec3 target, Vec3 waypoint, long expiresAt) {}
-    private static boolean isTrackedVehicle(Entity vehicle) {
+    private static String groundEngineType(Entity vehicle) {
         Object computed = invokeNoArg(vehicle, "computed");
         Object engineType = computed != null ? readMember(computed, "engineType") : null;
         if (engineType == null) engineType = readMember(vehicle, "engineType");
@@ -2358,8 +2400,20 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             if (engineInfo == null && computed != null) engineInfo = readMember(computed, "engineInfo");
             engineType = engineInfo;
         }
-        return engineType != null && engineType.toString().toUpperCase(Locale.ROOT).contains("TRACK");
+        return engineType == null ? "" : engineType.toString().toUpperCase(Locale.ROOT);
     }
+    static boolean isTrackedVehicle(Entity vehicle) { return groundEngineType(vehicle).contains("TRACK"); }
+    static boolean isWheeledVehicle(Entity vehicle) { return groundEngineType(vehicle).equals("WHEEL"); }
+    static com.arxyt.dominionsword.api.DominionGroundProfile groundProfile(Entity vehicle) {
+        var kind = isTrackedVehicle(vehicle) ? com.arxyt.dominionsword.api.DominionGroundProfile.Kind.TRACKED
+                : isWheeledVehicle(vehicle) ? com.arxyt.dominionsword.api.DominionGroundProfile.Kind.WHEELED : null;
+        if (kind == null) return null;
+        VehicleProfile p = VehicleProfile.from(vehicle);
+        return new com.arxyt.dominionsword.api.DominionGroundProfile(kind, Math.max(p.length,p.width),
+                Math.max(1,vehicle.getBoundingBox().getYsize()),p.maxStepUp,1.0,
+                kind == com.arxyt.dominionsword.api.DominionGroundProfile.Kind.WHEELED ? p.forwardStep / Math.max(.01D, Math.toRadians(p.yawStep)) : 0);
+    }
+
 
     private static boolean canWideTurn(Entity vehicle, float yawDelta, VehicleProfile profile) {
         Vec3 forward = Vec3.directionFromRotation(0.0F, vehicle.getYRot()).multiply(1.0D, 0.0D, 1.0D).normalize();
@@ -2811,6 +2865,11 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         }
     }
 
+    static void clearPlanning() {
+        ASYNC_ROUTES.values().forEach(build -> { if (build.future != null) build.future.cancel(false); });
+        ASYNC_ROUTES.clear();
+    }
+
     private static final class AsyncRouteBuild {
         final UUID pilot;
         final Vec3 start, safe;
@@ -2820,6 +2879,9 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         final List<DominionAsyncGridPlanner.Point> points = new ArrayList<>();
         final Map<Long, DominionAsyncGridPlanner.Cell> cells = new HashMap<>();
         int cursor;
+        int sampleLimit = 128;
+        List<Vec3> candidate;
+        int validated = 1;
         CompletableFuture<DominionAsyncGridPlanner.Result> future;
 
         AsyncRouteBuild(UUID pilot, Vec3 start, Vec3 safe, VehicleProfile profile, long generation, int radius, int goalX, int goalZ) {
@@ -2830,6 +2892,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
                 if ((x == 0 && z == 0) || (x == goalX && z == goalZ)) continue;
                 points.add(new DominionAsyncGridPlanner.Point(x, z));
             }
+            points.sort(Comparator.comparingDouble(p -> com.arxyt.dominionsword.api.DominionRouteSampling.priority(p.x(), p.z(), goalX, goalZ)));
         }
     }
 

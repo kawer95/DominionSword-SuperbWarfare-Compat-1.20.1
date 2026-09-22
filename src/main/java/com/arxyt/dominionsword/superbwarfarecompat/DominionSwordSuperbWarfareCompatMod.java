@@ -23,6 +23,7 @@ public final class DominionSwordSuperbWarfareCompatMod {
         DominionVehicleAdapters.register(vehicleAdapter);
         DominionEntityInteractions.register(new MortarEntityInteractionAdapter());
         MinecraftForge.EVENT_BUS.addListener(this::onServerTick);
+        MinecraftForge.EVENT_BUS.addListener((net.minecraftforge.event.server.ServerStoppedEvent event) -> SuperbWarfareUnitAdapter.clearPlanning());
         MinecraftForge.EVENT_BUS.addListener(this::onEntityJoin);
         MinecraftForge.EVENT_BUS.addListener(this::onEntityLeave);
     }

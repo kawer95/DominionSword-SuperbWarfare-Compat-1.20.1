@@ -147,6 +147,13 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
     }
 
     @Override
+    public com.arxyt.dominionsword.api.DominionGroundProfile groundProfile(Entity vehicle) {
+        if (!supports(vehicle)) return null;
+        return SuperbWarfareUnitAdapter.groundProfile(vehicle);
+    }
+    @Override public void holdGroundRoute(Entity vehicle) { invoke(vehicle, "processInput", new Class<?>[]{short.class}, (short)16); }
+
+    @Override
     public boolean supports(Entity vehicle) {
         return isSuperbWarfareVehicle(vehicle);
     }
