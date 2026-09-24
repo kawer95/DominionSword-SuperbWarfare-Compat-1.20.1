@@ -35,4 +35,23 @@ class GroundRouteControlPolicyTest {
         assertFalse(GroundRouteControlPolicy.continueTrackedPivot(false,true,44.0F));
     }
 
+    @Test void shortRouteEdgesNeedAlignmentBeforeTrackForwardInput() {
+        assertTrue(GroundRouteControlPolicy.alignTrackedRoute(true,true,true,30F));
+        assertFalse(GroundRouteControlPolicy.alignTrackedRoute(true,true,true,5F));
+        assertFalse(GroundRouteControlPolicy.alignTrackedRoute(false,true,true,30F));
+        assertFalse(GroundRouteControlPolicy.alignTrackedRoute(true,false,true,30F));
+    }
+    @Test void partialReleaseRequiresMotionAndRealProgressTowardGoal() {
+        assertTrue(GroundRouteControlPolicy.usefulPartial(4,20,16));
+        assertFalse(GroundRouteControlPolicy.usefulPartial(2,20,18));
+        assertFalse(GroundRouteControlPolicy.usefulPartial(6,20,21));
+        assertFalse(GroundRouteControlPolicy.usefulPartial(6,20,19));
+    }
+    @Test void frontierHeuristicAccountsForMandatoryTerrainCost() {
+        double h=GroundRouteControlPolicy.frontierHeuristic(10,0);
+        assertTrue(h>10);
+        assertTrue(h<10*1.75);
+        assertTrue(GroundRouteControlPolicy.frontierHeuristic(.5,.5)==0);
+    }
+
 }

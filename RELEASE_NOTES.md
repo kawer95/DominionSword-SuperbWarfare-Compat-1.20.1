@@ -1,3 +1,11 @@
+# 1.11.0-beta.5 — Bounded delivery and heading-aware route checks
+
+Requires Dominion Sword 1.37.0-beta.5. Searches can deliver a validated advancing prefix after 40 server ticks, and this planning attempt ends by its 100-tick check with a usable partial or cooldown. The shared soft budget is unchanged. Final validation may use additional budget slices.
+
+The new testable frontier preserves heading, validates tracked turns before translations, admits a checked exact-XY terminal connector, and uses terrain-aware heuristic/cost units. Route lookahead and tracked execution keep the same pivot-space check. Intermediate waypoint consumption uses the same 3D reach rule as braking.
+
+Tests include the real Bradley dimensions and observed east wall: a less constrained goal completes; the original tight wall-side goal must not be falsely reported complete. This remains a discrete straight/pivot model, not a complete continuous vehicle motion solver. No new in-game arrival or TPS benchmark is claimed. Keep groundPathTrace enabled for the next real-world check.
+
 # 1.11.0-beta.4.3 — Bradley route execution correction
 
 Requires core 1.37.0-beta.4. Bradley beta4.2 logs repeatedly showed NO_PATH after only three expansions, and valid partial routes were replaced by direct final approach. Navigation collision clearance now preserves the physical bottom plane instead of expanding into the supporting floor. Active routes take precedence over direct shortcuts, failed searches back off for the same goal, and close tracked turns consider steering infeasibility.
