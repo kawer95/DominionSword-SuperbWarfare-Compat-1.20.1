@@ -295,6 +295,19 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         }
     }
 
+    public List<Vec3> marchRoute(Mob pilot, Vec3 target) {
+        Entity vehicle=vehicleOf(pilot);if(vehicle==null)return List.of();
+        VehicleProfile profile=VehicleProfile.from(vehicle);
+        ensurePreparedRoute(pilot,vehicle,target,profile);
+        CompoundTag tag=pilot.getPersistentData();
+        if(tag.getBoolean(PILOT_ASYNC_ROUTE_PENDING) || !tag.contains(PILOT_PATH_POINTS,Tag.TAG_LIST))return List.of();
+        List<Vec3> result=new ArrayList<>();
+        for (var entry:tag.getList(PILOT_PATH_POINTS,Tag.TAG_COMPOUND)) {
+            Vec3 point=readPathPoint((CompoundTag)entry);if(point!=null)result.add(point);
+        }
+        return result;
+    }
+
     public void prepareMoveRoute(Mob mob, Vec3 finalTarget, int fleetRadius, Set<UUID> ignoredVehicles) {
         Entity vehicle = vehicleOf(mob);
         if (vehicle == null || driver(vehicle) != mob || finalTarget == null) return;
@@ -452,6 +465,9 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             if (!(entity instanceof Mob mob)) return false;
             Entity vehicle = vehicleOf(mob);
             if (vehicle == null) return false;
+            if (!isHelicopter(vehicle) && com.arxyt.dominionsword.api.DominionMarchApi.shouldBrake(vehicle)) {
+                processInput(vehicle, KEY_BRAKE_OR_UP); return true;
+            }
             LagTrace.mark("resolve_vehicle:id=" + vehicle.getId());
 
             mob.setTarget(null);

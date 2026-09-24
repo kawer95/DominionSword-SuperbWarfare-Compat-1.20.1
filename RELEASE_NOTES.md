@@ -1,3 +1,7 @@
+# 1.11.0-beta.2 — Unified march ownership
+
+Requires Dominion Sword 1.37.0-beta.2. Ground driving yields to the core persistent column/free task's waiting and conservative cruise-cap decisions. Native movement, collision and special flight/jump controllers remain addon-owned. No live physics or load benchmark has been performed.
+
 # 1.11.0-beta.1 — Ground pathfinding optimization
 
 Requires Dominion Sword 1.37.0-beta.1. Adds shared server planning admission, progressive corridor-first snapshot sampling, incremental segment validation and stale task cancellation. Ground profiles use engine metadata, excluding stationary weapons and aircraft. Local wheel candidates retain heading and minimum turn length. Route lookahead cannot cut unchecked corners or jump from a partial route to the final destination.

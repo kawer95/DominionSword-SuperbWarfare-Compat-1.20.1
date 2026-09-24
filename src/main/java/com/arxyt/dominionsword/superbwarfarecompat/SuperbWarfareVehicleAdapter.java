@@ -146,6 +146,11 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
         return 215.0F;
     }
 
+    @Override public List<Vec3> marchRoute(ServerPlayer player, Entity vehicle, Vec3 target) {
+        Entity pilot=driver(vehicle);
+        return pilot instanceof Mob mob ? unitAdapter.marchRoute(mob,target) : List.of();
+    }
+
     @Override
     public com.arxyt.dominionsword.api.DominionGroundProfile groundProfile(Entity vehicle) {
         if (!supports(vehicle)) return null;
