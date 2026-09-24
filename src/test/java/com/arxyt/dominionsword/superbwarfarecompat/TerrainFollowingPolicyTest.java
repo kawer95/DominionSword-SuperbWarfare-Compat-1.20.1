@@ -26,6 +26,14 @@ class TerrainFollowingPolicyTest {
     }
 
     @Test
+    void rejectsAWaypointOrGoalOnAnotherDeckAtTheSameHorizontalPosition() {
+        assertTrue(SuperbWarfareUnitAdapter.routePoseHeightMatches(64.0D, 65.0D));
+        assertFalse(SuperbWarfareUnitAdapter.routePoseHeightMatches(64.0D, 68.0D));
+        assertTrue(SuperbWarfareUnitAdapter.groundHeightMatches(64.0D, 65.0D));
+        assertFalse(SuperbWarfareUnitAdapter.groundHeightMatches(64.0D, 68.0D));
+    }
+
+    @Test
     void leavesTurningToForwardSteeringInsteadOfAngleBasedReverse() {
         assertFalse(SuperbWarfareUnitAdapter.shouldUseThreePointTurn(true, false, true, false, true));
         assertFalse(SuperbWarfareUnitAdapter.shouldUseThreePointTurn(true, false, true, false, false));
