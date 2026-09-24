@@ -296,16 +296,41 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     }
 
     public List<Vec3> marchRoute(Mob pilot, Vec3 target) {
-        Entity vehicle=vehicleOf(pilot);if(vehicle==null)return List.of();
+        if(pilot==null || target==null)return List.of();
+        Entity vehicle=vehicleOf(pilot);if(vehicle==null || driver(vehicle)!=pilot)return List.of();
         VehicleProfile profile=VehicleProfile.from(vehicle);
         ensurePreparedRoute(pilot,vehicle,target,profile);
         CompoundTag tag=pilot.getPersistentData();
         if(tag.getBoolean(PILOT_ASYNC_ROUTE_PENDING) || !tag.contains(PILOT_PATH_POINTS,Tag.TAG_LIST))return List.of();
-        List<Vec3> result=new ArrayList<>();
-        for (var entry:tag.getList(PILOT_PATH_POINTS,Tag.TAG_COMPOUND)) {
-            Vec3 point=readPathPoint((CompoundTag)entry);if(point!=null)result.add(point);
+        if(!hasValidAvoidanceRoute(tag,target,vehicle.position())) {
+            clearAvoidanceRoute(tag);
+            ensurePreparedRoute(pilot,vehicle,target,profile);
+            if(tag.getBoolean(PILOT_ASYNC_ROUTE_PENDING) || !hasValidAvoidanceRoute(tag,target,vehicle.position()))return List.of();
         }
-        return result;
+        ListTag points=tag.getList(PILOT_PATH_POINTS,Tag.TAG_COMPOUND);
+        if(points.size()<2)return List.of();
+        int index=Math.max(1,tag.getInt(PILOT_PATH_INDEX));
+        Vec3 end=readPathPoint(points.getCompound(points.size()-1));
+        if(end==null)return List.of();
+        // A partial route consumed at its safe end must let the native planner continue.
+        if(flatDistance(end,target)>3.0D
+                && (index>=points.size() || index==points.size()-1
+                && flatDistance(vehicle.position(),end)<=routePointReach(profile))) {
+            clearAvoidanceRoute(tag);
+            ensurePreparedRoute(pilot,vehicle,target,profile);
+            if(tag.getBoolean(PILOT_ASYNC_ROUTE_PENDING) || !hasValidAvoidanceRoute(tag,target,vehicle.position()))return List.of();
+            points=tag.getList(PILOT_PATH_POINTS,Tag.TAG_COMPOUND);
+            index=Math.max(1,tag.getInt(PILOT_PATH_INDEX));
+        }
+        if(index>=points.size())return List.of();
+        List<Vec3> result=new ArrayList<>();
+        result.add(vehicle.position());
+        for(int i=index;i<points.size();i++) {
+            Vec3 point=readPathPoint(points.getCompound(i));
+            if(point==null)return List.of();
+            result.add(point);
+        }
+        return result.get(result.size()-1).distanceToSqr(vehicle.position())>.01D ? result : List.of();
     }
 
     public void prepareMoveRoute(Mob mob, Vec3 finalTarget, int fleetRadius, Set<UUID> ignoredVehicles) {
