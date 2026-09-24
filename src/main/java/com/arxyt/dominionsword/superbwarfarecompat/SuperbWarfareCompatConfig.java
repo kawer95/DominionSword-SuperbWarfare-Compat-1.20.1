@@ -4,6 +4,7 @@ import net.minecraftforge.common.ForgeConfigSpec;
 
 public final class SuperbWarfareCompatConfig {
     public static final ForgeConfigSpec SPEC;
+    public static final ForgeConfigSpec.BooleanValue GROUND_PATH_TRACE;
     public static final ForgeConfigSpec.BooleanValue LAG_TRACE_ENABLED;
     public static final ForgeConfigSpec.DoubleValue LAG_TRACE_WARN_MS;
     public static final ForgeConfigSpec.BooleanValue FLIGHT_CONTROL_TRACE_ENABLED;
@@ -13,6 +14,7 @@ public final class SuperbWarfareCompatConfig {
     static {
         ForgeConfigSpec.Builder builder = new ForgeConfigSpec.Builder();
         builder.push("debug");
+        GROUND_PATH_TRACE = builder.comment("Ground route diagnostics for the Bradley stall investigation; disable after reproducing.").define("groundPathTrace", true);
         LAG_TRACE_ENABLED = builder
                 .comment("Enable detailed lag tracing for Dominion Sword Superb Warfare fleet control.")
                 .define("lagTrace", false);

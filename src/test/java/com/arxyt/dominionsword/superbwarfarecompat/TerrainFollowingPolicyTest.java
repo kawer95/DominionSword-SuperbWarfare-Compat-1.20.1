@@ -55,4 +55,21 @@ class TerrainFollowingPolicyTest {
         assertFalse(SuperbWarfareUnitAdapter.shouldAttemptTrackedEscapePivot(true, false, 19, 20));
         assertFalse(SuperbWarfareUnitAdapter.shouldAttemptTrackedEscapePivot(false, true, 20, 20));
     }
+    @Test void longRouteProgressDoesNotInvalidateItsActiveSegment() {
+        Vec3 start=new Vec3(99,64,0),end=new Vec3(100,64,0);
+        assertTrue(SuperbWarfareUnitAdapter.nearActiveRouteSegment(new Vec3(99.5,64,0),start,end,18));
+        assertFalse(SuperbWarfareUnitAdapter.nearActiveRouteSegment(new Vec3(99.5,64,25),start,end,18));
+        assertFalse(SuperbWarfareUnitAdapter.nearActiveRouteSegment(new Vec3(99.5,90,0),start,end,18));
+        assertFalse(SuperbWarfareUnitAdapter.nearActiveRouteSegment(end,null,end,18));
+    }
+
+    @Test void bradleyDoesNotConsumeTwoBlockPartialRouteWithoutMoving() {
+        Vec3 start=new Vec3(613.19,62.04,312.14);
+        Vec3 first=start.add(1,.5,0),tail=start.add(2,.5,0);
+        assertFalse(SuperbWarfareUnitAdapter.hasReachedGroundWaypoint(start,first));
+        assertFalse(SuperbWarfareUnitAdapter.hasReachedGroundWaypoint(start,tail));
+        assertTrue(SuperbWarfareUnitAdapter.hasReachedGroundWaypoint(tail,tail));
+        assertFalse(SuperbWarfareUnitAdapter.hasReachedGroundWaypoint(tail.add(0,2,0),tail));
+    }
+
 }

@@ -525,6 +525,18 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             ensurePreparedRoute(mob, vehicle, commandTarget, profile);
             LagTrace.mark("prepare_route");
             if (data.getBoolean(PILOT_ASYNC_ROUTE_PENDING)) {
+                pathDebugThrottled(mob, vehicle, "FRONTIER_WAIT", "goal=%s generation=%d cooldownRemaining=%d activeRoute=%s",
+                        fmt(commandTarget), data.getLong(PILOT_ROUTE_GENERATION),
+                        Math.max(0L, data.getLong(PILOT_AVOID_FAIL_UNTIL) - vehicle.level().getGameTime()),
+                        data.contains(PILOT_PATH_POINTS, Tag.TAG_LIST));
+                processInput(vehicle, KEY_BRAKE_OR_UP);
+                return true;
+            }
+            if (GroundRouteControlPolicy.holdForRetry(vehicle.level().getGameTime(),
+                    data.getLong(PILOT_AVOID_FAIL_UNTIL), sameRequestedEndpoint(data, commandTarget))
+                    && !data.contains(PILOT_PATH_POINTS, Tag.TAG_LIST)) {
+                pathDebugThrottled(mob, vehicle, "FRONTIER_COOLDOWN", "remaining=%d activeRoute=false",
+                        data.getLong(PILOT_AVOID_FAIL_UNTIL) - vehicle.level().getGameTime());
                 processInput(vehicle, KEY_BRAKE_OR_UP);
                 return true;
             }
@@ -663,8 +675,15 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             DriveDecision driveDecision = decideDriveMode(vehicle, yawDelta, absYawDelta, horizontalDistance, speed, profile, wideTurnAvailable, finalApproach, intermediateWaypoint);
             LagTrace.mark("drive_decision:" + driveDecision.mode().name());
             boolean trackedPivot = shouldPivotTrackedVehicle(isTrackedVehicle(vehicle), absYawDelta, horizontalDistance,
-                    trackedPivotRange(profile), intermediateWaypoint && !wideTurnAvailable);
+                    trackedPivotRange(profile), (intermediateWaypoint && !wideTurnAvailable)
+                            || (cannotArcToTarget(absYawDelta, horizontalDistance, profile) && !wideTurnAvailable));
+            trackedPivot |= GroundRouteControlPolicy.continueTrackedPivot(isTrackedVehicle(vehicle),
+                    DriveMode.TRACK_PIVOT.name().equals(data.getString(PILOT_DRIVE_MODE)), absYawDelta);
             if (trackedPivot) {
+                if (!canSweepPose(vehicle, vehicle.position(), vehicle.getYRot(), vehicle.position(), desiredYaw, profile)) {
+                    processInput(vehicle, KEY_BRAKE_OR_UP);
+                    return true;
+                }
                 clearThreePointState(data);
                 data.remove(PILOT_REVERSE_TICKS);
                 data.remove(PILOT_REVERSE_STEER);
@@ -914,10 +933,8 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
      */
     static boolean shouldPivotTrackedVehicle(boolean tracked, float absYawDelta, double horizontalDistance,
                                              double pivotRange, boolean narrowIntermediateCorner) {
-        if (!tracked || absYawDelta < TRACKED_PIVOT_ANGLE) return false;
-        if (horizontalDistance <= pivotRange) return true;
-        return narrowIntermediateCorner && absYawDelta >= TRACKED_PIVOT_CORNER_ANGLE
-                && horizontalDistance <= pivotRange * 1.5D;
+        return GroundRouteControlPolicy.trackedPivot(tracked, absYawDelta, horizontalDistance,
+                pivotRange, narrowIntermediateCorner);
     }
 
     static boolean shouldAttemptTrackedEscapePivot(boolean tracked, boolean horizontalCollision, int noProgressTicks,
@@ -1125,7 +1142,8 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     }
 
     private static double routePointReach(VehicleProfile profile) {
-        return Mth.clamp(profile.width + 0.75D, 3.5D, 5.0D);
+        // Route nodes are one block apart; vehicle width is not an arrival tolerance.
+        return 0.5D;
     }
 
     private static short reverseNavigationKeys(Entity vehicle, float desiredYaw, double horizontalDistance, double stopDistance, CompoundTag data, boolean alignRear) {
@@ -1211,17 +1229,29 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         long now = vehicle.level().getGameTime();
         double finalDistance = flatDistance(position, finalTarget);
         double finalApproachRange = directFinalApproachRange(profile);
-        if (finalDistance <= finalApproachRange
+        boolean hadPartial = data.getBoolean(PILOT_PATH_PARTIAL);
+        Vec3 queued = queuedAvoidanceWaypoint(mob, vehicle, finalTarget, profile, speed);
+        if (queued != null) return queued;
+        if (data.getBoolean(PILOT_ASYNC_ROUTE_PENDING)) return null;
+        if (hadPartial) {
+            queueNextFrontierRoute(mob, vehicle, finalTarget, profile);
+            return null;
+        }
+        boolean activeRoute = data.contains(PILOT_PATH_POINTS, Tag.TAG_LIST)
+                && hasValidAvoidanceRoute(data, finalTarget, position);
+        float directYaw = Math.abs(Mth.wrapDegrees(yawTo(position, finalTarget) - vehicle.getYRot()));
+        boolean headingFeasible = !cannotArcToTarget(directYaw, finalDistance, profile)
+                || isTrackedVehicle(vehicle) && canSweepPose(vehicle, position, vehicle.getYRot(), position,
+                yawTo(position, finalTarget), profile);
+        boolean directOverride = GroundRouteControlPolicy.allowDirectOverride(activeRoute,
+                data.getBoolean(PILOT_ASYNC_ROUTE_PENDING), headingFeasible);
+        if (directOverride && finalDistance <= finalApproachRange
                 && canTravelDirect(vehicle, position, finalTarget, profile, finalApproachRange)) {
             clearAvoidanceState(data);
             data.putString(PILOT_ROUTE_MODE, ROUTE_MODE_FINAL);
             pathDebugThrottled(mob, vehicle, "DIRECT_FINAL_APPROACH", "final=%s dist=%.2f range=%.2f profile=%s", fmt(finalTarget), finalDistance, finalApproachRange, profileSummary(profile));
             return finalTarget;
         }
-
-        Vec3 queued = queuedAvoidanceWaypoint(mob, vehicle, finalTarget, profile, speed);
-        if (queued != null) return queued;
-        if (data.getBoolean(PILOT_ASYNC_ROUTE_PENDING)) return null;
 
         if (hasValidAvoidance(data, finalTarget)) {
             Vec3 waypoint = new Vec3(data.getDouble(PILOT_AVOID_X), data.getDouble(PILOT_AVOID_Y), data.getDouble(PILOT_AVOID_Z));
@@ -1248,7 +1278,13 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         boolean lookaheadDirect = canTravelDirect(vehicle, position, lookaheadTarget, profile, Math.max(dynamicLookahead, flatDistance(position, lookaheadTarget)));
         boolean lookaheadReserved = lookaheadDirect && hasForeignReservationOnPath(vehicle, position, lookaheadTarget, profile, Math.max(dynamicLookahead, profile.length * 2.0D));
         boolean shouldRouteAroundReservation = lookaheadReserved && lateralBypassAvailable(vehicle, lookaheadTarget, profile, Math.max(dynamicLookahead, profile.length * 2.5D));
-        if (lookaheadDirect && !shouldRouteAroundReservation) {
+        float lookaheadYaw = Math.abs(Mth.wrapDegrees(yawTo(position, lookaheadTarget) - vehicle.getYRot()));
+        boolean lookaheadHeadingFeasible = !cannotArcToTarget(lookaheadYaw, flatDistance(position, lookaheadTarget), profile)
+                || isTrackedVehicle(vehicle) && canSweepPose(vehicle, position, vehicle.getYRot(), position,
+                yawTo(position, lookaheadTarget), profile);
+        if (lookaheadDirect && !shouldRouteAroundReservation
+                && GroundRouteControlPolicy.allowDirectOverride(activeRoute,
+                data.getBoolean(PILOT_ASYNC_ROUTE_PENDING), lookaheadHeadingFeasible)) {
             clearAvoidanceState(data);
             WAYPOINT_CACHE.remove(vehicle.getUUID());
             boolean finalCarrot = lookaheadTarget.distanceToSqr(finalTarget) <= 1.0D;
@@ -1498,9 +1534,15 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             ASYNC_ROUTES.remove(vehicle.getUUID()); build.planner.cancel(); data.remove(PILOT_ASYNC_ROUTE_PENDING); return;
         }
         DominionFrontierPlanner.Result<RouteState> result = build.planner.advance(planningBudget::step);
-        if (result.status() == DominionFrontierPlanner.Status.PENDING) return;
+        if (result.status() == DominionFrontierPlanner.Status.PENDING) {
+            pathDebugThrottled(mob, vehicle, "FRONTIER_PROGRESS", "generation=%d expanded=%d probes=%d goal=%s", build.generation, result.expanded(), result.probes(), fmt(build.safe));
+            return;
+        }
         if (result.path().size() < 2) {
-            ASYNC_ROUTES.remove(vehicle.getUUID()); data.remove(PILOT_ASYNC_ROUTE_PENDING); clearAvoidanceState(data); return;
+            recordFrontierFailure(mob, vehicle, data, "FRONTIER_FAILED",
+                    "status=" + result.status() + " expanded=" + result.expanded() + " probes=" + result.probes()
+                            + " goal=" + fmt(build.safe));
+            return;
         }
         if (build.candidate == null) {
             build.candidate = new ArrayList<>();
@@ -1510,6 +1552,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             if (result.status() == DominionFrontierPlanner.Status.COMPLETE
                     && last.distanceToSqr(build.safe) <= 36 && last.distanceToSqr(build.safe) > .01) build.candidate.add(build.safe);
         }
+        boolean connectorRejected = false;
         while (build.validated < build.candidate.size()) {
             if (!planningBudget.step()) return;
             Vec3 from=build.candidate.get(build.validated-1), to=build.candidate.get(build.validated);
@@ -1517,18 +1560,31 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
                     || !canOccupyRoutePose(vehicle, to, yawTo(from, to), build.profile)) {
                 // A rejected exact-end connector leaves a valid partial path; an interior rejection invalidates it.
                 if (build.validated == build.candidate.size()-1 && to.equals(build.safe) && build.validated > 1) {
-                    build.candidate.remove(build.validated); break;
+                    build.candidate.remove(build.validated); connectorRejected = true; break;
                 }
-                ASYNC_ROUTES.remove(vehicle.getUUID()); data.remove(PILOT_ASYNC_ROUTE_PENDING); clearAvoidanceState(data); return;
+                recordFrontierFailure(mob, vehicle, data, "FRONTIER_EDGE_REJECTED",
+                        "index=" + build.validated + " from=" + fmt(from) + " to=" + fmt(to));
+                return;
             }
             build.validated++;
         }
         ASYNC_ROUTES.remove(vehicle.getUUID()); data.remove(PILOT_ASYNC_ROUTE_PENDING);
         storeAvoidanceRoute(data, build.safe, build.candidate, firstUsefulWaypointIndex(build.candidate, vehicle.position(), build.profile), build.generation);
-        data.putBoolean(PILOT_PATH_PARTIAL, result.status() == DominionFrontierPlanner.Status.PARTIAL);
+        data.putBoolean(PILOT_PATH_PARTIAL, connectorRejected
+                || result.status() == DominionFrontierPlanner.Status.PARTIAL);
+        pathDebug(mob, vehicle, "FRONTIER_APPLIED", "status=%s expanded=%d probes=%d nodes=%d end=%s", result.status(), result.expanded(), result.probes(), build.candidate.size(), fmt(build.candidate.get(build.candidate.size()-1)));
         refreshPlannedPath(mob, vehicle, build.candidate);
 
         }
+    }
+
+    private static void recordFrontierFailure(Mob mob, Entity vehicle, CompoundTag data,
+                                              String phase, String detail) {
+        ASYNC_ROUTES.remove(vehicle.getUUID());
+        data.remove(PILOT_ASYNC_ROUTE_PENDING);
+        clearAvoidanceState(data);
+        data.putLong(PILOT_AVOID_FAIL_UNTIL, vehicle.level().getGameTime() + AVOIDANCE_FAIL_COOLDOWN_TICKS);
+        pathDebug(mob, vehicle, phase, "%s retryTicks=%d activeRoute=false", detail, AVOIDANCE_FAIL_COOLDOWN_TICKS);
     }
 
     private static boolean validateAsyncRoute(Entity vehicle, List<Vec3> route, VehicleProfile profile) {
@@ -1538,6 +1594,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
     private static void ensurePreparedRoute(Mob mob, Entity vehicle, Vec3 commandTarget, VehicleProfile profile) {
         CompoundTag data = mob.getPersistentData();
+        if (!sameRequestedEndpoint(data, commandTarget)) data.remove(PILOT_AVOID_FAIL_UNTIL);
         Vec3 storedSafe = activeSafeTarget(data, commandTarget);
         if (flatDistance(vehicle.position(), storedSafe) <= finalCaptureHoldDistance(profile) + 2.0D
                 && !sameRequestedEndpoint(data, commandTarget)) {
@@ -1561,6 +1618,8 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             advanceAsyncRoute(mob, vehicle, commandTarget, profile);
             return;
         }
+        if (GroundRouteControlPolicy.holdForRetry(vehicle.level().getGameTime(),
+                data.getLong(PILOT_AVOID_FAIL_UNTIL), sameRequestedEndpoint(data, commandTarget))) return;
         if (hasActiveSafeTarget(data, commandTarget) && data.contains(PILOT_PATH_POINTS, Tag.TAG_LIST)) return;
         prepareRouteWithoutFleet(mob, vehicle, commandTarget, profile);
     }
@@ -1652,10 +1711,13 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         ListTag points = data.getList(PILOT_PATH_POINTS, Tag.TAG_COMPOUND);
         int index = Math.max(1, data.getInt(PILOT_PATH_INDEX));
         Vec3 position = vehicle.position();
-        Vec3 routeStart = points.isEmpty() ? null : readPathPoint(points.getCompound(0));
-        if (routeStart == null || flatDistance(position, routeStart) > Math.max(AVOIDANCE_LOOKAHEAD, profile.length * 2.0D)) {
+        // Progress along a long route is not displacement from the route: compare the active segment.
+        int activeIndex = Math.min(index, points.size() - 1);
+        Vec3 segmentStart = activeIndex > 0 ? readPathPoint(points.getCompound(activeIndex - 1)) : null;
+        Vec3 segmentEnd = activeIndex >= 0 ? readPathPoint(points.getCompound(activeIndex)) : null;
+        if (!nearActiveRouteSegment(position, segmentStart, segmentEnd, Math.max(AVOIDANCE_LOOKAHEAD, profile.length * 2.0D))) {
             clearAvoidanceRoute(data);
-            pathDebug(mob, vehicle, "ROUTE_DROPPED_STALE_START", "routeStart=%s final=%s pos=%s", fmt(routeStart), fmt(finalTarget), fmt(position));
+            pathDebug(mob, vehicle, "ROUTE_DROPPED_OFF_SEGMENT", "start=%s end=%s final=%s pos=%s", fmt(segmentStart), fmt(segmentEnd), fmt(finalTarget), fmt(position));
             return null;
         }
         while (index < points.size()) {
@@ -1668,7 +1730,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             Vec3 nextPoint = index + 1 < points.size() ? readPathPoint(points.getCompound(index + 1)) : null;
             double reach = routePointReach(profile);
             if (routePoseHeightMatches(position.y, point.y)
-                    && (position.distanceToSqr(point) <= reach * reach
+                    && (hasReachedGroundWaypoint(position, point)
                     || hasPassedRoutePoint(position, previousPoint, point)
                     || hasMissedAndShouldSkipRoutePoint(position, previousPoint, point, nextPoint)
                     || canConsumeAlignedWaypoint(vehicle, position, previousPoint, point, nextPoint, profile, speed))) {
@@ -1709,6 +1771,19 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             if (flatDistance(position, point) >= lookahead) break;
         }
         return visible;
+    }
+
+    static boolean hasReachedGroundWaypoint(Vec3 position, Vec3 waypoint) {
+        return position != null && waypoint != null && position.distanceToSqr(waypoint) <= .25D;
+    }
+
+    static boolean nearActiveRouteSegment(Vec3 position, Vec3 start, Vec3 end, double tolerance) {
+        if (position == null || start == null || end == null) return false;
+        Vec3 segment = end.subtract(start);
+        double lengthSquared = segment.lengthSqr();
+        double t = lengthSquared < 1.0E-8D ? 0.0D
+                : Mth.clamp(position.subtract(start).dot(segment) / lengthSquared, 0.0D, 1.0D);
+        return position.distanceToSqr(start.add(segment.scale(t))) <= tolerance * tolerance;
     }
 
     private static boolean hasPassedRoutePoint(Vec3 position, Vec3 previousPoint, Vec3 point) {
@@ -1805,12 +1880,8 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
     private static int firstUsefulWaypointIndex(List<Vec3> route, Vec3 position, VehicleProfile profile) {
         if (route.size() <= 1) return -1;
-        double reach = routePointReach(profile);
-        double reachSqr = reach * reach;
-        for (int i = 1; i < route.size(); i++) {
-            if (position.distanceToSqr(route.get(i)) > reachSqr) return i;
-        }
-        return route.size() - 1;
+        // Do not skip the first edges of a newly validated route merely because the body is large.
+        return 1;
     }
 
     private static void storeAvoidanceRoute(CompoundTag data, Vec3 finalTarget, List<Vec3> route, int startIndex) {
@@ -2472,7 +2543,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             return !collidesWithWorld(vehicle, body) && hasStepSupport(vehicle, body.worldAabb());
         }
         AABB body = vehicle.getBoundingBox().move(position.subtract(vehicle.position()))
-                .inflate(profile.padding, 0.15D, profile.padding);
+                .inflate(profile.padding, 0.0D, profile.padding);
         return vehicle.level().noCollision(vehicle, body) && hasStepSupport(vehicle, body);
     }
 
@@ -2627,7 +2698,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         if (!profile.hasCollisionObb()) {
             AABB fallback = vehicle.getBoundingBox()
                     .move(predictedPosition.subtract(vehicle.position()))
-                    .inflate(profile.padding, 0.15D, profile.padding);
+                    .inflate(profile.padding, 0.0D, profile.padding);
             return canOccupyAabbSpace(vehicle, fallback, profile);
         }
 
@@ -2930,7 +3001,8 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             Vec3 right = new Vec3(-forward.z, 0.0D, forward.x);
             Vec3 center = vehiclePosition
                     .add(right.scale(collisionLocalCenter.x))
-                    .add(0.0D, collisionLocalCenter.y, 0.0D)
+                    // Clearance may extend above the roof, never below the actual ground-contact plane.
+                    .add(0.0D, collisionLocalCenter.y + 0.075D, 0.0D)
                     .add(forward.scale(collisionLocalCenter.z));
             double yaw = Math.toRadians(vehicleYaw + collisionCustomYaw);
             Vec3 obbForward = new Vec3(-Math.sin(yaw), 0.0D, Math.cos(yaw)).normalize();
@@ -2938,7 +3010,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             Vec3 obbUp = new Vec3(0.0D, 1.0D, 0.0D);
             Vec3 paddedExtents = new Vec3(
                     collisionExtents.x + padding,
-                    collisionExtents.y + 0.15D,
+                    collisionExtents.y + 0.075D,
                     collisionExtents.z + padding
             );
             return new OrientedBox(center, obbRight, obbUp, obbForward, paddedExtents);
@@ -3293,7 +3365,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     }
 
     private static void pathDebug(Entity vehicle, String phase, String format, Object... args) {
-        if (!PATH_LOGGING) return;
+        if (!PATH_LOGGING && !SuperbWarfareCompatConfig.GROUND_PATH_TRACE.get()) return;
         String message;
         try {
             message = String.format(Locale.ROOT, format, args);
