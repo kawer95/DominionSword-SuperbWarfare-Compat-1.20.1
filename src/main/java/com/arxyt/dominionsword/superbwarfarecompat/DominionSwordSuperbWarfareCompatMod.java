@@ -23,12 +23,15 @@ public final class DominionSwordSuperbWarfareCompatMod {
         DominionVehicleAdapters.register(vehicleAdapter);
         DominionEntityInteractions.register(new MortarEntityInteractionAdapter());
         MinecraftForge.EVENT_BUS.addListener(this::onServerTick);
+        MinecraftForge.EVENT_BUS.addListener(M2MotionCalibration::register);
+        MinecraftForge.EVENT_BUS.addListener((net.minecraftforge.event.server.ServerStoppedEvent event) -> M2MotionCalibration.clear());
         MinecraftForge.EVENT_BUS.addListener((net.minecraftforge.event.server.ServerStoppedEvent event) -> SuperbWarfareUnitAdapter.clearPlanning());
         MinecraftForge.EVENT_BUS.addListener(this::onEntityJoin);
         MinecraftForge.EVENT_BUS.addListener(this::onEntityLeave);
     }
 
     private void onServerTick(TickEvent.ServerTickEvent event) {
+        if (event.phase == TickEvent.Phase.START) { M2MotionCalibration.tick(event.getServer()); return; }
         if (event.phase != TickEvent.Phase.END) return;
         SuperbWarfareVehicleAdapter.cleanupExpiredCaches(event.getServer().overworld().getGameTime());
         vehicleAdapter.tickHelicopterAutopilot(event.getServer());
@@ -39,6 +42,9 @@ public final class DominionSwordSuperbWarfareCompatMod {
     }
 
     private void onEntityLeave(EntityLeaveLevelEvent event) {
-        if (!event.getLevel().isClientSide()) vehicleAdapter.onEntityUnloaded(event.getEntity());
+        if (!event.getLevel().isClientSide()) {
+            M2MotionCalibration.unloaded(event.getEntity());
+            vehicleAdapter.onEntityUnloaded(event.getEntity());
+        }
     }
 }

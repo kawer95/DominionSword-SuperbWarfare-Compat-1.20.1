@@ -4,6 +4,7 @@ import net.minecraftforge.common.ForgeConfigSpec;
 
 public final class SuperbWarfareCompatConfig {
     public static final ForgeConfigSpec SPEC;
+    public static final ForgeConfigSpec.BooleanValue M2_MOTION_CALIBRATION;
     public static final ForgeConfigSpec.BooleanValue GROUND_PATH_TRACE;
     public static final ForgeConfigSpec.BooleanValue LAG_TRACE_ENABLED;
     public static final ForgeConfigSpec.DoubleValue LAG_TRACE_WARN_MS;
@@ -14,6 +15,7 @@ public final class SuperbWarfareCompatConfig {
     static {
         ForgeConfigSpec.Builder builder = new ForgeConfigSpec.Builder();
         builder.push("debug");
+        M2_MOTION_CALIBRATION=builder.comment("Enable explicit operator-only single-M2 motion calibration commands. Not automatic pathfinding.").define("m2MotionCalibration",false);
         GROUND_PATH_TRACE = builder.comment("Ground route diagnostics for the Bradley stall investigation; disable after reproducing.").define("groundPathTrace", true);
         LAG_TRACE_ENABLED = builder
                 .comment("Enable detailed lag tracing for Dominion Sword Superb Warfare fleet control.")

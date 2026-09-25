@@ -1591,6 +1591,7 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
 
     private static Object invoke(Object target, String name, Class<?>[] parameterTypes, Object... args) {
         if (target == null) return null;
+        if ("processInput".equals(name) && target instanceof Entity entity && M2MotionCalibration.owns(entity)) return null;
         MethodKey key = MethodKey.of(target.getClass(), name, parameterTypes);
         if (BROKEN_METHODS.contains(key)) return null;
         try {

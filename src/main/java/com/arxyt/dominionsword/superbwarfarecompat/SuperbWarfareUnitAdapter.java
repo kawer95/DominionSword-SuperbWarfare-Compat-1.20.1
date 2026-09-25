@@ -497,6 +497,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
     @Override
     public boolean move(ServerPlayer player, Entity entity, Vec3 target) {
+        if (entity instanceof Mob pilot && M2MotionCalibration.owns(vehicleOf(pilot))) return true;
         try (LagTrace ignoredTrace = LagTrace.start("unit.move", "entity=" + (entity == null ? "null" : entity.getId()) + " target=" + (target == null ? "null" : fmt(target)))) {
             if (!(entity instanceof Mob mob)) return false;
             Entity vehicle = vehicleOf(mob);
@@ -4108,7 +4109,47 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         return engineType == null ? "" : engineType.toString().toUpperCase(Locale.ROOT);
     }
 
+    static boolean calibrationVehicleReady(Entity vehicle) {
+        if(!(vehicle instanceof com.atsuishio.superbwarfare.entity.vehicle.base.VehicleEntity nativeVehicle)
+                || nativeVehicle.isWreck() || vehicle.isInWaterOrBubble() || vehicle.isInLava()
+                || Math.abs(vehicle.getXRot())>3 || Math.abs(nativeVehicle.getRoll())>3) return false;
+        Object computed=invokeNoArg(vehicle,"computed");
+        Object engine=readMember(vehicle,"engineInfo");
+        if(engine==null && computed!=null)engine=readMember(computed,"engineInfo");
+        double cost=readEngineDouble(engine,"energyCostRate","EnergyCostRate",96);
+        return Double.isFinite(cost) && cost>=0 && nativeVehicle.getEnergy()>=Math.max(1,Math.ceil(cost));
+    }
+
+    static Entity calibrationDriver(Entity vehicle) { return driver(vehicle); }
+
+    static AABB calibrationBounds(Entity vehicle, com.arxyt.dominionsword.vehicle.navigation.VehicleMotion.Segment segment) {
+        VehicleProfile profile=VehicleProfile.from(vehicle);
+        if(!profile.hasCollisionObb()) throw new IllegalArgumentException("Native collision OBB unavailable");
+        double radius=Math.hypot(profile.collisionExtents.x+profile.padding,profile.collisionExtents.z+profile.padding)
+                +Math.hypot(profile.collisionLocalCenter.x,profile.collisionLocalCenter.z)+.5;
+        var a=segment.entry();var b=segment.exit();
+        double bottom=profile.collisionLocalCenter.y-profile.collisionExtents.y;
+        double top=profile.collisionLocalCenter.y+profile.collisionExtents.y;
+        return new AABB(Math.min(a.x(),b.x())-radius,Math.min(a.y(),b.y())+bottom-1.5,Math.min(a.z(),b.z())-radius,
+                Math.max(a.x(),b.x())+radius,Math.max(a.y(),b.y())+top+1.5,Math.max(a.z(),b.z())+radius);
+    }
+
+    static boolean calibrationPathClear(Entity vehicle, com.arxyt.dominionsword.vehicle.navigation.VehicleMotion.Segment segment) {
+        VehicleProfile profile=VehicleProfile.from(vehicle);
+        if(!profile.hasCollisionObb()) return false;
+        var a=segment.entry();var b=segment.exit();
+        Vec3 from=new Vec3(a.x(),a.y(),a.z()),to=new Vec3(b.x(),b.y(),b.z());
+        if(!routeChunksLoaded(vehicle,from,to,Math.max(profile.length,profile.width)+2))return false;
+        int samples=Math.max(1,Math.max(Mth.ceil(from.distanceTo(to)/.25),Mth.ceil(Math.abs(Mth.wrapDegrees(b.yaw()-a.yaw()))/5)));
+        for(int i=0;i<=samples;i++) {
+            var pose=a.interpolate(b,i/(double)samples);
+            if(!canOccupyRoutePose(vehicle,new Vec3(pose.x(),pose.y(),pose.z()),(float)pose.yaw(),profile))return false;
+        }
+        return true;
+    }
+
     private static void processInput(Entity vehicle, short keys) {
+        if (M2MotionCalibration.owns(vehicle)) return;
         CompoundTag data = vehicle.getPersistentData();
         long now = vehicle.level().getGameTime();
         if (data.getLong(PILOT_LAST_INPUT_TICK) == now && (keys & KEY_BRAKE_OR_UP) == 0 && keys != 0) return;

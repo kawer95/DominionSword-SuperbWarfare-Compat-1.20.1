@@ -1,3 +1,9 @@
+# 1.11.0-beta.6 — Explicit M2 motion calibration
+
+Requires core 1.37.0-beta.6 for the isolated vehicle-motion session API. Adds an opt-in operator-only `/dominion_m2_test` entry for short forward/reverse movement and stationary pivots. Existing commander/driver permissions still apply. Default configuration is off; ordinary pathfinding is not switched to V2.
+
+Native input direction and track brake semantics were checked against the deployed 0.8.9.1 jar. The controller parameters are initial estimates, not measured physics. Single-vehicle ownership, stale orders, driver changes, terrain checks, energy/wreck/ground gates and a 400-tick deadline constrain the experiment. See the core engineering `vehicle-navigation-v2/M2_CALIBRATION.md` instructions. No real-world calibration is claimed.
+
 # 1.11.0-beta.5 — Bounded delivery and heading-aware route checks
 
 Requires Dominion Sword 1.37.0-beta.5. Searches can deliver a validated advancing prefix after 40 server ticks, and this planning attempt ends by its 100-tick check with a usable partial or cooldown. The shared soft budget is unchanged. Final validation may use additional budget slices.
