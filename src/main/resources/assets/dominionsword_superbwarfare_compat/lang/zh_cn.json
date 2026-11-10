@@ -1,0 +1,16 @@
+{
+  "menu.dominionsword_superbwarfare_compat.mortar.aim": "瞄准目标",
+  "menu.dominionsword_superbwarfare_compat.mortar.fire": "发射",
+  "menu.dominionsword_superbwarfare_compat.mortar.cancel": "取消",
+  "screen.dominionsword_superbwarfare_compat.mortar_ammo": "%s - 选择迫击炮弹",
+  "screen.dominionsword_superbwarfare_compat.cancel": "取消",
+  "message.dominionsword_superbwarfare_compat.mortar.out_of_range": "标定位置超过迫击炮指挥范围",
+  "message.dominionsword_superbwarfare_compat.mortar.target_set": "迫击炮目标已标定：%s, %s, %s",
+  "message.dominionsword_superbwarfare_compat.mortar.aim_ordered": "%s正在前往迫击炮完成标定",
+  "message.dominionsword_superbwarfare_compat.mortar.not_aimed": "迫击炮尚未标定目标",
+  "message.dominionsword_superbwarfare_compat.mortar.no_ammo": "所选单位没有可用的迫击炮弹",
+  "message.dominionsword_superbwarfare_compat.mortar.fire_ordered": "已下令装填并发射：%s",
+  "message.dominionsword_superbwarfare_compat.mortar.busy": "迫击炮正在装填或发射",
+  "message.dominionsword_superbwarfare_compat.mortar.ammo_missing": "指定的迫击炮弹已不在单位背包中",
+  "message.dominionsword_superbwarfare_compat.mortar.fire_failed": "迫击炮拒绝了发射指令，炮弹已退回"
+}
