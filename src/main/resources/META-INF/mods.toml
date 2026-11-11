@@ -32,7 +32,7 @@ side="BOTH"
 [[dependencies."${mod_id}"]]
 modId="dominionsword"
 mandatory=true
-versionRange="[1.36.117,)"
+versionRange="[1.36.121,)"
 ordering="AFTER"
 side="BOTH"
 
@@ -40,5 +40,12 @@ side="BOTH"
 modId="superbwarfare"
 mandatory=true
 versionRange="[0.8.9,)"
+ordering="AFTER"
+side="BOTH"
+
+[[dependencies."${mod_id}"]]
+modId="vehicle_control_runtime"
+mandatory=true
+versionRange="[1.0.5,2)"
 ordering="AFTER"
 side="BOTH"

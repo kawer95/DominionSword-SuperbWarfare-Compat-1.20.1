@@ -12,5 +12,6 @@
   "message.dominionsword_superbwarfare_compat.mortar.fire_ordered": "已下令装填并发射：%s",
   "message.dominionsword_superbwarfare_compat.mortar.busy": "迫击炮正在装填或发射",
   "message.dominionsword_superbwarfare_compat.mortar.ammo_missing": "指定的迫击炮弹已不在单位背包中",
-  "message.dominionsword_superbwarfare_compat.mortar.fire_failed": "迫击炮拒绝了发射指令，炮弹已退回"
+  "message.dominionsword_superbwarfare_compat.mortar.fire_failed": "迫击炮拒绝了发射指令，炮弹已退回",
+  "message.dominionsword.sw_body.difficult_to_reach": "载具难以抵达目标，请调整目标位置或路线。"
 }

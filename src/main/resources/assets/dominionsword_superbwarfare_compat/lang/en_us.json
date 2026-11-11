@@ -12,5 +12,6 @@
   "message.dominionsword_superbwarfare_compat.mortar.fire_ordered": "Ordered loading and firing: %s",
   "message.dominionsword_superbwarfare_compat.mortar.busy": "The mortar is loading or firing",
   "message.dominionsword_superbwarfare_compat.mortar.ammo_missing": "The selected mortar shell is no longer in the unit inventory",
-  "message.dominionsword_superbwarfare_compat.mortar.fire_failed": "The mortar rejected the firing command; the shell was returned"
+  "message.dominionsword_superbwarfare_compat.mortar.fire_failed": "The mortar rejected the firing command; the shell was returned",
+  "message.dominionsword.sw_body.difficult_to_reach": "Vehicle is having difficulty reaching the destination. Adjust the destination or route."
 }

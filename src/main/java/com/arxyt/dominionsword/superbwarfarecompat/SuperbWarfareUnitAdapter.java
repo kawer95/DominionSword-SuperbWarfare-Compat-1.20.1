@@ -323,7 +323,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         try {
             if (isTrackedVehicle(vehicle)) TRACKED_POSE_CACHES.remove(vehicle.getUUID());
             VehicleProfile profile = VehicleProfile.from(vehicle).withFleetRadius(fleetRadius);
-            Vec3 safeTarget = safeTargetNear(vehicle, finalTarget, profile);
+            Vec3 safeTarget = BodyControl.usesPathPlanner(vehicle) ? finalTarget : safeTargetNear(vehicle, finalTarget, profile);
             String policy = pathPolicy(vehicle);
             CompoundTag data = mob.getPersistentData();
             long generation = data.getLong(PILOT_ROUTE_GENERATION) + 1L;
@@ -335,7 +335,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             data.putDouble(PILOT_SAFE_TARGET_X, safeTarget.x);
             data.putDouble(PILOT_SAFE_TARGET_Y, safeTarget.y);
             data.putDouble(PILOT_SAFE_TARGET_Z, safeTarget.z);
-            if (PATH_POLICY_DIRECT.equals(policy)) {
+            if (PATH_POLICY_DIRECT.equals(policy) || BodyControl.usesPathPlanner(vehicle)) {
                 List<Vec3> route = List.of(vehicle.position(), safeTarget);
                 storeAvoidanceRoute(data, safeTarget, route, 1, generation);
                 refreshPlannedPath(mob, vehicle, route);
@@ -499,17 +499,22 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
             VehicleProfile profile = VehicleProfile.from(vehicle);
             Vec3 commandTarget = target;
             CompoundTag data = mob.getPersistentData();
-            if (BodyControl.requested(vehicle, player, mob)) {
+            ServerPlayer commander=BodyControl.commander(vehicle,player);
+            if (BodyControl.requested(vehicle, commander, mob)) {
                 WHEEL_DRIVES.remove(vehicle);
                 ensurePreparedRoute(mob, vehicle, commandTarget, profile);
                 Vec3 goal = activeSafeTarget(data, commandTarget);
-                Vec3 waypoint = PATH_POLICY_DIRECT.equals(pathPolicy(vehicle)) ? goal
+                if(BodyControl.usesPathPlanner(vehicle)&&invokeNoArg(vehicle,"getCollisionOBBInfo")!=null){
+                    // The old occupancy search can accept a floor-penetrating OBB at y-1. Keep the command surface height; the new planner validates support itself.
+                    goal=new Vec3(goal.x,commandTarget.y,goal.z);
+                }
+                Vec3 waypoint = (PATH_POLICY_DIRECT.equals(pathPolicy(vehicle)) || BodyControl.usesPathPlanner(vehicle)) ? goal
                         : bodyNavigationTarget(mob, vehicle, goal, profile);
                 ListTag bodyPoints=data.getList(PILOT_PATH_POINTS,Tag.TAG_COMPOUND);
                 boolean completeRoute=bodyPoints.size()>1 && flatDistance(readPathPoint(bodyPoints.getCompound(0)),readPathPoint(bodyPoints.getCompound(bodyPoints.size()-1)))>.25;
                 if(!completeRoute && waypoint!=null && flatDistance(waypoint,goal)<.01)
                     completeRoute=canTravelDirect(vehicle,vehicle.position(),goal,profile,flatDistance(vehicle.position(),goal)+profile.length);
-                BodyControl.request(vehicle, mob, player, waypoint, goal, completeRoute);
+                BodyControl.request(vehicle, mob, commander, waypoint, goal, completeRoute);
                 alignWeaponsForward(vehicle, vehicle.getDeltaMovement().dot(Vec3.directionFromRotation(0,vehicle.getYRot()))>.005);
                 if (waypoint != null) VehicleGridManager.rememberFutureFootprint(vehicle, waypoint, profile.voxelRadius, profile.length, RESERVATION_TTL_TICKS);
                 return true;
@@ -1673,7 +1678,9 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
     private static void ensurePreparedRoute(Mob mob, Entity vehicle, Vec3 commandTarget, VehicleProfile profile) {
         CompoundTag data = mob.getPersistentData();
-        if(!hasActiveSafeTarget(data,commandTarget)) {
+        boolean explicitMoveChanged=BodyControl.usesPathPlanner(vehicle)&&vehicle.getPersistentData().getBoolean("DominionOfflineVehicleMove")
+                &&(Math.abs(data.getDouble(PILOT_FINAL_TARGET_X)-commandTarget.x)>1e-4||Math.abs(data.getDouble(PILOT_FINAL_TARGET_Z)-commandTarget.z)>1e-4);
+        if(explicitMoveChanged||!hasActiveSafeTarget(data,commandTarget)) {
             clearPilotState(mob);
             prepareRouteWithoutFleet(mob,vehicle,commandTarget,profile);
             return;
@@ -1690,7 +1697,7 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         if (PATH_POLICY_DIRECT.equals(pathPolicy(vehicle))) {
             CompoundTag data = mob.getPersistentData();
             long generation = data.getLong(PILOT_ROUTE_GENERATION) + 1L;
-            Vec3 safeTarget = safeTargetNear(vehicle, commandTarget, profile);
+            Vec3 safeTarget = BodyControl.usesPathPlanner(vehicle) ? commandTarget : safeTargetNear(vehicle, commandTarget, profile);
             clearAvoidanceState(data);
             data.putLong(PILOT_ROUTE_GENERATION, generation);
             data.putDouble(PILOT_FINAL_TARGET_X, commandTarget.x);
@@ -2980,6 +2987,12 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
     private static boolean canOccupyVehicleSpace(Entity vehicle, Vec3 predictedPosition, float predictedYaw, VehicleProfile profile) {
         if (!profile.hasCollisionObb()) {
+            if (com.arxyt.dominionsword.api.SuperbVehicleControlMode.current()==com.arxyt.dominionsword.api.SuperbVehicleControlMode.BODY_DIRECT) {
+                // AABB-backed SW vehicles use vanilla movement. Test the actual
+                // returned pose, not a raised/padded proxy at a different height.
+                AABB nativeBox=vehicle.getBoundingBox().move(predictedPosition.subtract(vehicle.position())).deflate(1.0E-6D);
+                return vehicle.level().noCollision(vehicle,nativeBox) && hasStepSupport(vehicle,nativeBox);
+            }
             AABB fallback = vehicle.getBoundingBox()
                     .move(predictedPosition.subtract(vehicle.position()))
                     .inflate(profile.padding, 0.15D, profile.padding);
@@ -3193,7 +3206,9 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
     private static boolean collidesWithWorld(Entity vehicle, OrientedBox obb) {
         AABB search = obb.worldAabb().inflate(1.0E-4D);
         for (VoxelShape shape : vehicle.level().getBlockCollisions(vehicle, search)) {
-            if (!shape.isEmpty() && obb.intersects(shape.bounds())) return true;
+            // Fences, stairs and lamp fixtures contain disconnected boxes. Their
+            // enclosing bounds fill traversable gaps that native collision keeps.
+            for (AABB part : shape.toAabbs()) if (obb.intersects(part)) return true;
         }
         for (Entity other : vehicle.level().getEntities(vehicle, search)) {
             if (other == vehicle || !isSuperbWarfareVehicle(other)) continue;
@@ -3281,6 +3296,15 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
         return speed;
     }
 
+    /** Stable chassis geometry for the private controller's numeric interface. */
+    static double[] controlHull(Entity vehicle){
+        Object info=invokeNoArg(vehicle,"getCollisionOBBInfo");
+        if(info!=null){
+            Vec3 half=(Vec3)BodyNative.get(info,"Size"),offset=(Vec3)BodyNative.get(info,"Position");
+            return new double[]{half.x,half.y,half.z,offset.x,offset.y,offset.z,1};
+        }
+        var b=vehicle.getBoundingBox();return new double[]{b.getXsize()/2,b.getYsize()/2,b.getZsize()/2,b.getCenter().x-vehicle.getX(),b.getCenter().y-vehicle.getY(),b.getCenter().z-vehicle.getZ(),0};
+    }
     static double bodyLength(Entity vehicle) { return VehicleProfile.from(vehicle).length; }
     static void resetBodyRoute(Mob driver) { clearAvoidanceState(driver.getPersistentData()); }
 
@@ -3323,6 +3347,8 @@ public final class SuperbWarfareUnitAdapter implements DominionUnitAdapter {
 
     /** Full-pose rotation sweep; the small contact tolerance matches native ground embedding. */
     static boolean bodyRotationClear(Entity vehicle, float yaw) {
+        // Vanilla AABB collision does not rotate with the vehicle's yaw.
+        if(invokeNoArg(vehicle,"getCollisionOBBInfo")==null)return true;
         invokeNoArg(vehicle, "updateOBB");
         List<OrientedBox> boxes = liveCollisionBoxes(vehicle);
         if (boxes.isEmpty()) return false;

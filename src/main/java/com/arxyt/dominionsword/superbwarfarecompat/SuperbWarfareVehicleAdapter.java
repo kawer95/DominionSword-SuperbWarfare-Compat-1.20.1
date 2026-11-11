@@ -595,6 +595,81 @@ public final class SuperbWarfareVehicleAdapter implements DominionVehicleAdapter
         return routes;
     }
 
+    @Override public boolean supportsHoldPosition(Entity vehicle) { return supports(vehicle); }
+
+    @Override public boolean canAttackFromHold(Entity vehicle, LivingEntity target) {
+        if(target==null||!target.isAlive()||vehicle.distanceToSqr(target)>96*96)return false;
+        for(SeatView seat:seats(vehicle))if(seat.passenger() instanceof Mob mob&&mob.isAlive())
+            for(String weapon:seatWeaponNames(vehicle,seat.index()))if(holdWeaponCanAim(vehicle,weapon,target))return true;
+        return false;
+    }
+
+    /** Only native turret/weapon controllers run here; pursuit, standoff and helicopter takeoff are excluded. */
+    @Override public boolean attackFromHold(ServerPlayer player,Entity vehicle,LivingEntity target) {
+        if(driver(vehicle) instanceof Mob mob)unitAdapter.hold(player,mob);else stopVehicle(vehicle);
+        if(target==null){
+            writeMember(vehicle,"aiTurretTargetUUID","");writeMember(vehicle,"aiPassengerWeaponTargetUUID","");
+            for(SeatView seat:seats(vehicle))if(seat.passenger() instanceof Mob mob)mob.setTarget(null);
+            return true;
+        }
+        if(!canAttackFromHold(vehicle,target))return true;
+        assignVehicleTarget(vehicle,target);aimOfficialControllers(vehicle,target);
+        long now=vehicle.level().getGameTime();
+        for(SeatView seat:seats(vehicle))if(seat.passenger() instanceof Mob mob&&mob.isAlive()){
+            mob.setTarget(null);mob.lookAt(target,180,180);mob.getLookControl().setLookAt(target,180,180);
+            for(String weapon:seatWeaponNames(vehicle,seat.index())){
+                if(!holdWeaponCanAim(vehicle,weapon,target))continue;
+                Object gun=invoke(vehicle,"getGunData",new Class<?>[]{String.class},weapon);
+                Object supplier=invokeNoArg(vehicle,"getAmmoSupplier");
+                if(Boolean.TRUE.equals(invoke(gun,"shouldStartReloading",new Class<?>[]{Entity.class},supplier))) {
+                    invokeVoid(vehicle,"modifyGunData",new Class<?>[]{String.class,java.util.function.Consumer.class},weapon,
+                            (java.util.function.Consumer<Object>)data->invokeVoid(data,"startReload",new Class<?>[0]));
+                }
+                if(!Boolean.TRUE.equals(invoke(gun,"canShoot",new Class<?>[]{Entity.class},supplier)))continue;
+                Object raw=invoke(vehicle,"getShootVec",new Class<?>[]{String.class,float.class},weapon,1F);
+                Object origin=invoke(vehicle,"getShootPos",new Class<?>[]{String.class,float.class},weapon,1F);
+                if(!(raw instanceof Vec3 direction)||!(origin instanceof Vec3 muzzle))continue;
+                Vec3 delta=target.getBoundingBox().getCenter().subtract(muzzle);
+                if(direction.normalize().dot(delta.normalize())<Math.cos(Math.toRadians(VEHICLE_WEAPON_MAX_AIM_ERROR_DEGREES)))continue;
+                int rpm=Math.max(1,numberValue(invoke(vehicle,"vehicleWeaponRpm",new Class<?>[]{String.class},weapon),60));
+                String key=VEHICLE_WEAPON_LAST_SHOT+"hold_"+weapon;
+                if(now-vehicle.getPersistentData().getLong(key)<Math.max(1,(long)Math.ceil(1200D/rpm)))continue;
+                if(invokeVoid(vehicle,"vehicleShoot",new Class<?>[]{LivingEntity.class,String.class,UUID.class,Vec3.class},mob,weapon,target.getUUID(),null))vehicle.getPersistentData().putLong(key,now);
+            }
+        }
+        return true;
+    }
+
+    private static boolean holdWeaponCanAim(Entity vehicle,String weapon,LivingEntity target){
+        Object gun=invoke(vehicle,"getGunData",new Class<?>[]{String.class},weapon);
+        if(gun==null)return false;
+        // Native vehicle ticks refresh only the selected gun. Held stations may fire every equipped gun.
+        if(Boolean.TRUE.equals(invokeNoArg(gun,"useBackpackAmmo"))){
+            Object counter=readMember(gun,"backupAmmoCount");
+            int available=numberValue(invoke(gun,"countBackupAmmo",new Class<?>[]{Entity.class},invokeNoArg(vehicle,"getAmmoSupplier")),0);
+            if(numberValue(invokeNoArg(counter,"get"),0)!=available)invokeVoid(vehicle,"modifyGunData",
+                    new Class<?>[]{String.class,java.util.function.Consumer.class},weapon,
+                    (java.util.function.Consumer<Object>)data->invokeVoid(readMember(data,"backupAmmoCount"),"set",new Class<?>[]{int.class},available));
+        }
+        int ammo=numberValue(invoke(vehicle,"getAmmoCount",new Class<?>[]{String.class},weapon),0);
+        if(ammo<=0&&!Boolean.TRUE.equals(invoke(vehicle,"hasCreativeAmmoBoxCached",new Class<?>[0]))
+                &&!Boolean.TRUE.equals(invoke(gun,"shouldStartReloading",new Class<?>[]{Entity.class},invokeNoArg(vehicle,"getAmmoSupplier")))
+                &&!Boolean.TRUE.equals(invokeNoArg(gun,"reloading")))return false;
+        Object origin=invoke(vehicle,"getShootPos",new Class<?>[]{String.class,float.class},weapon,1F);
+        if(!(origin instanceof Vec3 muzzle)||!hasWeaponLine(vehicle,muzzle,target))return false;
+        Vec3 delta=target.getBoundingBox().getCenter().subtract(muzzle);
+        Object direction=invokeNoArg(gun,"fireDirection");String transform=String.valueOf(readMember(direction,"string"));
+        if("Barrel".equals(transform)||"Turret".equals(transform)){
+            double yaw=Mth.wrapDegrees((float)Math.toDegrees(Math.atan2(-delta.x,delta.z))-vehicle.getYRot());
+            double pitch=-Math.toDegrees(Math.atan2(delta.y,delta.horizontalDistance()));
+            return yaw>=BodyNative.number(vehicle,"TurretMinYaw")&&yaw<=BodyNative.number(vehicle,"TurretMaxYaw")
+                    &&pitch>=BodyNative.number(vehicle,"TurretMinPitch")&&pitch<=BodyNative.number(vehicle,"TurretMaxPitch");
+        }
+        if("WeaponStationBarrel".equals(transform)||"Passenger".equals(transform))return true;
+        Object raw=invoke(vehicle,"getShootVec",new Class<?>[]{String.class,float.class},weapon,1F);
+        return raw instanceof Vec3 fixed&&fixed.normalize().dot(delta.normalize())>=Math.cos(Math.toRadians(VEHICLE_WEAPON_MAX_AIM_ERROR_DEGREES));
+    }
+
     @Override
     public boolean attack(ServerPlayer player, Entity vehicle, LivingEntity target) {
         List<WeaponOperator> weaponOperators = assignPassengerTargets(player, vehicle, target);
